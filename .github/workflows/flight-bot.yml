@@ -1,0 +1,33 @@
+name: Automated Flight Bot
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # Daily at 7 AM UTC
+  workflow_dispatch:      # Manual trigger for testing
+
+jobs:
+  flight-deals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+    
+    - name: Run Flight Bot
+      env:
+        TRAVELPAYOUTS_API_TOKEN: ${{ secrets.TRAVELPAYOUTS_API_TOKEN }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TRAVELPAYOUTS_AFFILIATE_MARKER: ${{ secrets.TRAVELPAYOUTS_AFFILIATE_MARKER }}
+      run: python automated_flight_bot.py
