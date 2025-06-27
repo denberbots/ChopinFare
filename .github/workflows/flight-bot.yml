@@ -2,7 +2,7 @@ name: Automated Flight Bot
 
 on:
   schedule:
-    - cron: '0 7 * * *'  # Daily at 7 AM UTC
+    - cron: '0 5 * * *'  # Daily at 5 AM UTC (7 AM CEST)
   workflow_dispatch:      # Manual trigger for testing
 
 jobs:
@@ -30,4 +30,4 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TRAVELPAYOUTS_AFFILIATE_MARKER: ${{ secrets.TRAVELPAYOUTS_AFFILIATE_MARKER }}
-      run: python automated_flight_bot.py
+      run: python FlightBot_final.py
