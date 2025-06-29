@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Fully Automated Flight Bot - Single Command Version
-- Automatically updates 4-month cache AND detects deals in one run
+MongoDB Flight Bot - Cloud Database Version
+- Uses MongoDB Atlas for persistent 4-month cache
+- Automated cache updates AND deal detection in one run
 - Z-score 1.7 threshold for ~50 deals/week
 - Smart deduplication: price drops allowed, weekly reset
-- Perfect for automation with cron jobs
+- Perfect for GitHub Actions automation
 """
 
 import requests
 import time
 import logging
-import sqlite3
-import hashlib
 import statistics
 import math
 import os
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
-from pathlib import Path
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
 
 # Logging configuration
 logging.basicConfig(
@@ -144,80 +144,44 @@ class VerifiedDeal:
                 f"📊 {self.savings_percent:.0f}% below typical ({self.median_price:.0f} zł)\n\n"
                 f"🔗 [Book Deal]({self.booking_link})")
 
-class FlightCache:
-    """4-month rolling cache with optimized operations"""
+class MongoFlightCache:
+    """MongoDB-based flight cache with persistent 4-month rolling window"""
     
-    def __init__(self, cache_dir: str = "flight_cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-        self.db_path = self.cache_dir / "flight_cache.db"
-        self.CACHE_DAYS = 120
-        self._conn = None
-        self._init_database()
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
+        self.client = None
+        self.db = None
+        self.CACHE_DAYS = 120  # 4 months
+        self._connect()
     
-    def _get_connection(self):
-        """Reuse database connection for efficiency"""
-        if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, timeout=30.0)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute("PRAGMA cache_size=10000")
-        return self._conn
-    
-    def _init_database(self):
-        """Initialize optimized database schema"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Single execution with all tables and indexes
-        cursor.executescript('''
-            CREATE TABLE IF NOT EXISTS flight_data (
-                id INTEGER PRIMARY KEY,
-                destination TEXT NOT NULL,
-                outbound_date TEXT NOT NULL,
-                return_date TEXT NOT NULL,
-                price REAL NOT NULL,
-                transfers_out INTEGER,
-                transfers_return INTEGER,
-                airline TEXT,
-                cached_date TEXT NOT NULL,
-                trip_duration INTEGER
-            );
-            
-            CREATE TABLE IF NOT EXISTS destination_stats (
-                destination TEXT PRIMARY KEY,
-                median_price REAL,
-                std_dev REAL,
-                min_price REAL,
-                max_price REAL,
-                sample_size INTEGER,
-                last_updated TEXT
-            );
-            
-            CREATE TABLE IF NOT EXISTS deal_alerts (
-                id INTEGER PRIMARY KEY,
-                destination TEXT NOT NULL,
-                price REAL NOT NULL,
-                z_score REAL NOT NULL,
-                alert_date TEXT NOT NULL
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_destination_date ON flight_data(destination, cached_date);
-            CREATE INDEX IF NOT EXISTS idx_cached_date ON flight_data(cached_date);
-            CREATE INDEX IF NOT EXISTS idx_alerts_dest_date ON deal_alerts(destination, alert_date);
-        ''')
-        conn.commit()
+    def _connect(self):
+        """Connect to MongoDB Atlas"""
+        try:
+            console.info("🔗 Connecting to MongoDB Atlas...")
+            self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=10000)
+            # Test connection
+            self.client.admin.command('ping')
+            self.db = self.client['flight_bot_db']
+            console.info("✅ Connected to MongoDB Atlas successfully")
+        except ConnectionFailure as e:
+            console.info(f"❌ Failed to connect to MongoDB: {e}")
+            raise
+        except Exception as e:
+            console.info(f"❌ MongoDB connection error: {e}")
+            raise
     
     def is_cache_current(self) -> bool:
         """Check if cache has been updated today"""
         today = datetime.now().strftime('%Y-%m-%d')
-        cursor = self._get_connection().cursor()
-        cursor.execute('SELECT COUNT(*) FROM flight_data WHERE cached_date = ?', (today,))
-        count = cursor.fetchone()[0]
-        return count > 1000  # At least some meaningful data from today
+        try:
+            count = self.db.flight_data.count_documents({'cached_date': today})
+            return count > 1000  # At least some meaningful data from today
+        except Exception as e:
+            console.info(f"⚠️ Error checking cache status: {e}")
+            return False
     
     def cache_daily_data(self, api, destinations: List[str], months: List[str]):
-        """Optimized daily caching with batch operations"""
+        """Cache daily flight data to MongoDB"""
         today = datetime.now().strftime('%Y-%m-%d')
         
         # Check if we already cached today
@@ -225,13 +189,15 @@ class FlightCache:
             console.info(f"✅ Cache already current for {today} - skipping cache update")
             return
         
-        console.info(f"🗃️ Starting cache update for {len(destinations)} destinations")
-        
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
         
         # Remove today's data if any exists (partial update)
-        cursor.execute('DELETE FROM flight_data WHERE cached_date = ?', (today,))
+        try:
+            deleted = self.db.flight_data.delete_many({'cached_date': today})
+            if deleted.deleted_count > 0:
+                console.info(f"🧹 Removed {deleted.deleted_count} partial entries for today")
+        except Exception as e:
+            console.info(f"⚠️ Error cleaning today's data: {e}")
         
         # Batch insert for better performance
         all_entries = []
@@ -246,11 +212,17 @@ class FlightCache:
                 
                 if combinations:
                     for combo in combinations:
-                        all_entries.append((
-                            destination, combo.outbound_date, combo.return_date, combo.total_price,
-                            combo.outbound_transfers, combo.return_transfers, combo.outbound_airline,
-                            today, combo.duration_days
-                        ))
+                        all_entries.append({
+                            'destination': destination,
+                            'outbound_date': combo.outbound_date,
+                            'return_date': combo.return_date,
+                            'price': combo.total_price,
+                            'transfers_out': combo.outbound_transfers,
+                            'transfers_return': combo.return_transfers,
+                            'airline': combo.outbound_airline,
+                            'cached_date': today,
+                            'trip_duration': combo.duration_days
+                        })
                     
                     successful_destinations += 1
                     console.info(f"  ✅ {destination}: Cached {len(combinations)} combinations")
@@ -259,15 +231,13 @@ class FlightCache:
                 
                 # Batch insert every 1000 entries for memory efficiency
                 if len(all_entries) >= 1000:
-                    cursor.executemany('''
-                        INSERT INTO flight_data 
-                        (destination, outbound_date, return_date, price, transfers_out, 
-                         transfers_return, airline, cached_date, trip_duration)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', all_entries)
-                    total_cached += len(all_entries)
-                    all_entries.clear()
-                    conn.commit()  # Commit in batches
+                    try:
+                        self.db.flight_data.insert_many(all_entries, ordered=False)
+                        total_cached += len(all_entries)
+                        all_entries.clear()
+                    except Exception as e:
+                        console.info(f"⚠️ Batch insert error: {e}")
+                        all_entries.clear()
                 
                 # Small delay to be nice to the API
                 if i % 10 == 0:
@@ -279,101 +249,151 @@ class FlightCache:
         
         # Insert remaining entries
         if all_entries:
-            cursor.executemany('''
-                INSERT INTO flight_data 
-                (destination, outbound_date, return_date, price, transfers_out, 
-                 transfers_return, airline, cached_date, trip_duration)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', all_entries)
-            total_cached += len(all_entries)
+            try:
+                self.db.flight_data.insert_many(all_entries, ordered=False)
+                total_cached += len(all_entries)
+            except Exception as e:
+                console.info(f"⚠️ Final batch insert error: {e}")
         
         # Update statistics for all destinations that have data
-        self._update_all_destination_stats(cursor)
+        self._update_all_destination_stats()
         
         # Clean up old data
-        self._manage_rolling_window(cursor, today)
+        self._manage_rolling_window(today)
         
-        conn.commit()
-        console.info(f"✅ Cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
+        console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
     
-    def _update_all_destination_stats(self, cursor):
+    def _update_all_destination_stats(self):
         """Update statistics for all destinations with sufficient data"""
         console.info("📊 Updating destination statistics...")
         
-        # Get all destinations with data
-        cursor.execute('SELECT DISTINCT destination FROM flight_data')
-        destinations = [row[0] for row in cursor.fetchall()]
-        
-        stats_updated = 0
-        for destination in destinations:
-            cursor.execute('SELECT price FROM flight_data WHERE destination = ?', (destination,))
-            prices = [row[0] for row in cursor.fetchall()]
+        try:
+            # Get all destinations with data
+            destinations = self.db.flight_data.distinct('destination')
+            stats_updated = 0
             
-            if len(prices) >= 50:  # Need minimum data for reliable stats
-                stats = (
-                    destination,
-                    statistics.median(prices),
-                    statistics.stdev(prices) if len(prices) > 1 else 0,
-                    min(prices),
-                    max(prices),
-                    len(prices),
-                    datetime.now().strftime('%Y-%m-%d')
+            for destination in destinations:
+                # Get all prices for this destination
+                prices_cursor = self.db.flight_data.find(
+                    {'destination': destination}, 
+                    {'price': 1, '_id': 0}
                 )
-                cursor.execute('''
-                    INSERT OR REPLACE INTO destination_stats 
-                    (destination, median_price, std_dev, min_price, max_price, sample_size, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', stats)
-                stats_updated += 1
-        
-        console.info(f"📊 Updated statistics for {stats_updated} destinations")
+                prices = [doc['price'] for doc in prices_cursor]
+                
+                if len(prices) >= 50:  # Need minimum data for reliable stats
+                    stats_doc = {
+                        'destination': destination,
+                        'median_price': statistics.median(prices),
+                        'std_dev': statistics.stdev(prices) if len(prices) > 1 else 0,
+                        'min_price': min(prices),
+                        'max_price': max(prices),
+                        'sample_size': len(prices),
+                        'last_updated': datetime.now().strftime('%Y-%m-%d')
+                    }
+                    
+                    # Upsert (update or insert)
+                    self.db.destination_stats.replace_one(
+                        {'destination': destination},
+                        stats_doc,
+                        upsert=True
+                    )
+                    stats_updated += 1
+            
+            console.info(f"📊 Updated statistics for {stats_updated} destinations")
+            
+        except Exception as e:
+            console.info(f"⚠️ Error updating destination stats: {e}")
     
-    def _manage_rolling_window(self, cursor, current_date: str):
-        """Efficiently remove old data"""
-        cutoff_date = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=self.CACHE_DAYS)).strftime('%Y-%m-%d')
-        cursor.execute('DELETE FROM flight_data WHERE cached_date < ?', (cutoff_date,))
-        if cursor.rowcount > 0:
-            console.info(f"🧹 Removed {cursor.rowcount:,} old entries (keeping 4-month window)")
+    def _manage_rolling_window(self, current_date: str):
+        """Remove data older than 4 months"""
+        try:
+            cutoff_date = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=self.CACHE_DAYS)).strftime('%Y-%m-%d')
+            result = self.db.flight_data.delete_many({'cached_date': {'$lt': cutoff_date}})
+            if result.deleted_count > 0:
+                console.info(f"🧹 Removed {result.deleted_count:,} old entries (keeping 4-month window)")
+        except Exception as e:
+            console.info(f"⚠️ Error managing rolling window: {e}")
     
     def get_market_data(self, destination: str) -> Optional[Dict]:
         """Get cached market statistics"""
-        cursor = self._get_connection().cursor()
-        cursor.execute('SELECT * FROM destination_stats WHERE destination = ?', (destination,))
-        stats = cursor.fetchone()
-        
-        if stats:
-            return {
-                'destination': stats[0], 'median_price': stats[1], 'std_dev': stats[2],
-                'min_price': stats[3], 'max_price': stats[4], 'sample_size': stats[5]
-            }
-        return None
+        try:
+            stats = self.db.destination_stats.find_one({'destination': destination})
+            if stats:
+                return {
+                    'destination': stats['destination'],
+                    'median_price': stats['median_price'],
+                    'std_dev': stats['std_dev'],
+                    'min_price': stats['min_price'],
+                    'max_price': stats['max_price'],
+                    'sample_size': stats['sample_size']
+                }
+            return None
+        except Exception as e:
+            console.info(f"⚠️ Error getting market data for {destination}: {e}")
+            return None
     
     def get_cache_summary(self) -> Dict:
         """Get cache statistics"""
-        cursor = self._get_connection().cursor()
-        
-        # Total entries
-        cursor.execute('SELECT COUNT(*) FROM flight_data')
-        total_entries = cursor.fetchone()[0]
-        
-        # Destinations with stats
-        cursor.execute('SELECT COUNT(*) FROM destination_stats WHERE sample_size >= 50')
-        ready_destinations = cursor.fetchone()[0]
-        
-        # Date range
-        cursor.execute('SELECT MIN(cached_date), MAX(cached_date) FROM flight_data')
-        date_range = cursor.fetchone()
-        
-        return {
-            'total_entries': total_entries,
-            'ready_destinations': ready_destinations,
-            'date_range': date_range
-        }
+        try:
+            # Total entries
+            total_entries = self.db.flight_data.count_documents({})
+            
+            # Destinations with stats
+            ready_destinations = self.db.destination_stats.count_documents({'sample_size': {'$gte': 50}})
+            
+            # Date range
+            date_range = None
+            try:
+                oldest = self.db.flight_data.find_one(sort=[('cached_date', 1)])
+                newest = self.db.flight_data.find_one(sort=[('cached_date', -1)])
+                if oldest and newest:
+                    date_range = (oldest['cached_date'], newest['cached_date'])
+            except:
+                pass
+            
+            return {
+                'total_entries': total_entries,
+                'ready_destinations': ready_destinations,
+                'date_range': date_range
+            }
+        except Exception as e:
+            console.info(f"⚠️ Error getting cache summary: {e}")
+            return {'total_entries': 0, 'ready_destinations': 0, 'date_range': None}
     
-    def __del__(self):
-        """Clean up database connection"""
-        if self._conn:
-            self._conn.close()
+    def log_deal_alert(self, deal: VerifiedDeal):
+        """Log deal alert to prevent duplicates"""
+        try:
+            alert_doc = {
+                'destination': deal.destination,
+                'price': deal.price,
+                'z_score': deal.z_score,
+                'alert_date': datetime.now().strftime('%Y-%m-%d')
+            }
+            self.db.deal_alerts.insert_one(alert_doc)
+        except Exception as e:
+            console.info(f"⚠️ Error logging deal alert: {e}")
+    
+    def get_recent_alert(self, destination: str) -> Optional[Dict]:
+        """Get most recent alert for destination"""
+        try:
+            alert = self.db.deal_alerts.find_one(
+                {'destination': destination},
+                sort=[('alert_date', -1)]
+            )
+            return alert
+        except Exception as e:
+            console.info(f"⚠️ Error getting recent alert for {destination}: {e}")
+            return None
+    
+    def cleanup_old_alerts(self):
+        """Remove alerts older than 30 days"""
+        try:
+            cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            result = self.db.deal_alerts.delete_many({'alert_date': {'$lt': cutoff_date}})
+            if result.deleted_count > 0:
+                console.info(f"🧹 Cleaned up {result.deleted_count} old alerts")
+        except Exception as e:
+            console.info(f"⚠️ Error cleaning up alerts: {e}")
 
 class SmartAPI:
     """Optimized API handler with efficient caching"""
@@ -603,8 +623,8 @@ class FastTelegram:
             logger.warning(f"Telegram error: {e}")
             return False
 
-class AutomatedFlightBot:
-    """Fully automated bot that updates cache AND detects deals in one run"""
+class MongoFlightBot:
+    """MongoDB-powered automated flight bot"""
     
     # Class constants for better memory usage
     Z_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
@@ -626,10 +646,10 @@ class AutomatedFlightBot:
         'DWC', 'DOH', 'JED', 'DMM', 'BOO', 'FRU'
     ]
     
-    def __init__(self, api_token: str, affiliate_marker: str, telegram_token: str, telegram_chat_id: str):
+    def __init__(self, api_token: str, affiliate_marker: str, telegram_token: str, telegram_chat_id: str, mongodb_connection: str):
         self.api = SmartAPI(api_token, affiliate_marker)
         self.telegram = FastTelegram(telegram_token, telegram_chat_id)
-        self.cache = FlightCache()
+        self.cache = MongoFlightCache(mongodb_connection)
         self.start_time = None
         self.total_start_time = None
     
@@ -645,21 +665,17 @@ class AutomatedFlightBot:
         return months
     
     def should_alert_destination(self, destination: str, current_price: float, z_score: float) -> bool:
-        """Smart alerting logic with optimized database access"""
+        """Smart alerting logic with MongoDB access"""
         if z_score < self.Z_THRESHOLDS['minimum']:
             return False
         
-        cursor = self.cache._get_connection().cursor()
-        cursor.execute('''
-            SELECT price, alert_date FROM deal_alerts 
-            WHERE destination = ? ORDER BY alert_date DESC LIMIT 1
-        ''', (destination,))
-        
-        recent_alert = cursor.fetchone()
+        recent_alert = self.cache.get_recent_alert(destination)
         if not recent_alert:
             return True
         
-        last_price, last_date = recent_alert
+        last_price = recent_alert['price']
+        last_date = recent_alert['alert_date']
+        
         try:
             days_since = (datetime.now() - datetime.strptime(last_date, '%Y-%m-%d')).days
         except ValueError:
@@ -667,15 +683,6 @@ class AutomatedFlightBot:
         
         return (days_since >= self.WEEKLY_RESET_DAYS or 
                 (last_price - current_price) / last_price > self.PRICE_IMPROVEMENT_THRESHOLD)
-    
-    def log_deal_alert(self, deal: VerifiedDeal):
-        """Log deal efficiently"""
-        cursor = self.cache._get_connection().cursor()
-        cursor.execute('''
-            INSERT INTO deal_alerts (destination, price, z_score, alert_date)
-            VALUES (?, ?, ?, ?)
-        ''', (deal.destination, deal.price, deal.z_score, datetime.now().strftime('%Y-%m-%d')))
-        cursor.connection.commit()
     
     def classify_deal_with_zscore(self, price: float, market_data: Dict) -> Tuple[str, float, float, float]:
         """Optimized deal classification"""
@@ -805,33 +812,34 @@ class AutomatedFlightBot:
         """Send optimized alert"""
         success = self.telegram.send(str(deal))
         if success:
-            self.log_deal_alert(deal)
+            self.cache.log_deal_alert(deal)
             console.info(f"📱 Alert #{deal_number} for {deal.destination} - {deal.price:.0f} zł")
         else:
             console.info(f"⚠️ Failed to send alert for {deal.destination}")
     
     def update_cache_and_detect_deals(self):
-        """Main automated method: updates cache AND detects deals"""
+        """Main automated method: updates MongoDB cache AND detects deals"""
         self.total_start_time = time.time()
         
-        console.info("🤖 FULLY AUTOMATED FLIGHT BOT STARTED")
+        console.info("🤖 MONGODB FLIGHT BOT STARTED")
         console.info("=" * 50)
         
         months = self._generate_future_months()
         
         # Send startup notification
-        startup_msg = (f"🤖 *AUTOMATED FLIGHT BOT STARTED*\n\n"
-                      f"🔄 Phase 1: Cache Update\n"
+        startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
+                      f"🗃️ Phase 1: MongoDB Cache Update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
-                      f"⚡ Z-score ≥1.7 | Smart deduplication active")
+                      f"⚡ Z-score ≥1.7 | Smart deduplication active\n"
+                      f"☁️ Persistent MongoDB Atlas cache")
         
         if not self.telegram.send(startup_msg):
             console.info("⚠️ Failed to send startup notification")
         
-        # PHASE 1: UPDATE CACHE
-        console.info("\n🔄 PHASE 1: CACHE UPDATE")
-        console.info("=" * 30)
+        # PHASE 1: UPDATE MONGODB CACHE
+        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE")
+        console.info("=" * 35)
         
         cache_start = time.time()
         try:
@@ -841,20 +849,21 @@ class AutomatedFlightBot:
             # Get cache summary
             cache_summary = self.cache.get_cache_summary()
             
-            console.info(f"✅ Cache update completed in {cache_time:.1f} minutes")
+            console.info(f"✅ MongoDB cache update completed in {cache_time:.1f} minutes")
             console.info(f"📊 Cache summary: {cache_summary['total_entries']:,} entries, {cache_summary['ready_destinations']} destinations ready")
             
             # Send cache update notification
-            cache_msg = (f"✅ *CACHE UPDATE COMPLETE*\n\n"
+            cache_msg = (f"✅ *MONGODB CACHE UPDATE COMPLETE*\n\n"
                         f"⏱️ Time: {cache_time:.1f} minutes\n"
-                        f"📊 Entries: {cache_summary['total_entries']:,}\n"
-                        f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n\n"
+                        f"📊 Total entries: {cache_summary['total_entries']:,}\n"
+                        f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
+                        f"☁️ Persistent cloud storage\n\n"
                         f"🚀 Starting deal detection...")
             
             self.telegram.send(cache_msg)
             
         except Exception as e:
-            error_msg = f"❌ Cache update failed: {e}"
+            error_msg = f"❌ MongoDB cache update failed: {e}"
             console.info(error_msg)
             self.telegram.send(error_msg)
             return []
@@ -907,13 +916,18 @@ class AutomatedFlightBot:
         detection_time = (time.time() - self.start_time) / 60
         cache_time = total_time - detection_time
         
+        # Get cache stats
+        cache_summary = self.cache.get_cache_summary()
+        
         if not deals:
-            summary = (f"🤖 *AUTOMATED BOT COMPLETE*\n\n"
+            summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                       f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                      f"🔄 Cache update: {cache_time:.1f} min\n"
+                      f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
+                      f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
                       f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} required)\n\n"
+                      f"☁️ Persistent MongoDB Atlas cache\n"
                       f"🔄 Next run: Tomorrow (automated)")
             
             self.telegram.send(summary)
@@ -928,41 +942,38 @@ class AutomatedFlightBot:
         total_savings = sum(d.savings_percent for d in deals)
         avg_savings = total_savings / len(deals) if deals else 0
         
-        summary = (f"🤖 *AUTOMATED BOT COMPLETE*\n\n"
+        summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                   f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                  f"🔄 Cache update: {cache_time:.1f} min\n"
+                  f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
                   f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                   f"✅ **{len(deals)} DEALS FOUND**\n"
                   f"🔥 {exceptional} exceptional (Z≥{self.Z_THRESHOLDS['exceptional']})\n"
                   f"💎 {excellent} excellent (Z≥{self.Z_THRESHOLDS['excellent']})\n"
                   f"💰 {great} great (Z≥{self.Z_THRESHOLDS['great']})\n\n"
                   f"📊 Average savings: {avg_savings:.0f}%\n"
+                  f"🗃️ Database: {cache_summary['total_entries']:,} entries\n"
                   f"🎯 Smart deduplication active\n"
-                  f"🗃️ 4-month cache analysis\n\n"
+                  f"☁️ Persistent MongoDB Atlas cache\n\n"
                   f"🔄 Next run: Tomorrow (automated)")
         
         self.telegram.send(summary)
         console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
-        """Single command that does EVERYTHING"""
+        """Single command that does EVERYTHING with MongoDB"""
         try:
             # Clean up old alerts first
-            cursor = self.cache._get_connection().cursor()
-            cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-            cursor.execute('DELETE FROM deal_alerts WHERE alert_date < ?', (cutoff_date,))
-            if cursor.rowcount > 0:
-                console.info(f"🧹 Cleaned up {cursor.rowcount} old alerts")
-            cursor.connection.commit()
+            self.cache.cleanup_old_alerts()
             
-            # Main automation: cache update + deal detection
+            # Main automation: MongoDB cache update + deal detection
             deals = self.update_cache_and_detect_deals()
             
             # Summary
             total_time = (time.time() - self.total_start_time) / 60
-            console.info(f"\n🤖 AUTOMATED BOT COMPLETE")
+            console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
+            console.info(f"☁️ MongoDB Atlas cache persistent")
             
             self.send_final_summary(deals)
             
@@ -970,22 +981,23 @@ class AutomatedFlightBot:
             error_msg = f"\n❌ Bot error: {str(e)}"
             console.info(error_msg)
             logger.error(f"Bot error: {e}")
-            self.telegram.send(f"❌ Automated bot error: {str(e)}")
+            self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Simplified main function for automation"""
+    """Main function for MongoDB-powered automation"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
     
-    # Get environment variables efficiently
+    # Get environment variables
     env_vars = {
         'API_TOKEN': os.getenv('TRAVELPAYOUTS_API_TOKEN'),
         'AFFILIATE_MARKER': os.getenv('TRAVELPAYOUTS_AFFILIATE_MARKER', 'default_marker'),
         'TELEGRAM_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN'),
-        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID')
+        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID'),
+        'MONGODB_CONNECTION': os.getenv('MONGODB_CONNECTION_STRING')
     }
     
     missing = [k for k, v in env_vars.items() if not v and k != 'AFFILIATE_MARKER']
@@ -993,9 +1005,10 @@ def main():
         console.info(f"❌ Missing environment variables: {', '.join(missing)}")
         return
     
-    bot = AutomatedFlightBot(
+    bot = MongoFlightBot(
         env_vars['API_TOKEN'], env_vars['AFFILIATE_MARKER'],
-        env_vars['TELEGRAM_TOKEN'], env_vars['TELEGRAM_CHAT_ID']
+        env_vars['TELEGRAM_TOKEN'], env_vars['TELEGRAM_CHAT_ID'],
+        env_vars['MONGODB_CONNECTION']
     )
     
     # Handle command line arguments for flexibility
@@ -1003,7 +1016,7 @@ def main():
     command = sys.argv[1] if len(sys.argv) > 1 else None
     
     if command == '--cache-only':
-        # Just update cache (for testing)
+        # Just update MongoDB cache (for testing)
         months = bot._generate_future_months()
         bot.cache.cache_daily_data(bot.api, bot.DESTINATIONS, months)
     elif command == '--detect-only':
@@ -1017,7 +1030,7 @@ def main():
                 deals.extend(bot.find_and_verify_deals_for_destination(destination, market_data, months))
         console.info(f"Found {len(deals)} deals in test")
     else:
-        # DEFAULT: Full automation (cache + detection)
+        # DEFAULT: Full automation (MongoDB cache + detection)
         bot.run()
 
 if __name__ == "__main__":
