@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-MongoDB Flight Bot - Final Version with 45-Day Cache
-- Uses MongoDB Atlas for persistent 1.5-month cache (realistic for 512 MB)
+MongoDB Flight Bot - Corrected Version
+- ALWAYS performs daily cache updates (no skipping)
+- Uses MongoDB Atlas for persistent 45-day cache (realistic for 512 MB)
 - Automated cache updates AND deal detection in one run
 - Z-score 1.7 threshold for ~50 deals/week
 - Smart deduplication: price drops allowed, weekly reset
@@ -145,7 +146,7 @@ class VerifiedDeal:
                 f"🔗 [Book Deal]({self.booking_link})")
 
 class MongoFlightCache:
-    """MongoDB-based flight cache with persistent 45-day rolling window"""
+    """MongoDB-based flight cache with persistent 45-day rolling window - ALWAYS UPDATES"""
     
     def __init__(self, connection_string: str):
         self.connection_string = connection_string
@@ -170,32 +171,18 @@ class MongoFlightCache:
             console.info(f"❌ MongoDB connection error: {e}")
             raise
     
-    def is_cache_current(self) -> bool:
-        """Check if cache has been updated today"""
-        today = datetime.now().strftime('%Y-%m-%d')
-        try:
-            count = self.db.flight_data.count_documents({'cached_date': today})
-            return count > 1000  # At least some meaningful data from today
-        except Exception as e:
-            console.info(f"⚠️ Error checking cache status: {e}")
-            return False
-    
     def cache_daily_data(self, api, destinations: List[str], months: List[str]):
-        """Cache daily flight data to MongoDB"""
+        """Cache daily flight data to MongoDB - ALWAYS PERFORMS FULL UPDATE"""
         today = datetime.now().strftime('%Y-%m-%d')
-        
-        # Check if we already cached today
-        if self.is_cache_current():
-            console.info(f"✅ Cache already current for {today} - skipping cache update")
-            return
         
         console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
+        console.info(f"📅 Cache date: {today} (ALWAYS updates - no skipping)")
         
-        # Remove today's data if any exists (partial update)
+        # Remove today's data if any exists (ensures fresh daily data)
         try:
             deleted = self.db.flight_data.delete_many({'cached_date': today})
             if deleted.deleted_count > 0:
-                console.info(f"🧹 Removed {deleted.deleted_count} partial entries for today")
+                console.info(f"🧹 Removed {deleted.deleted_count} existing entries for {today}")
         except Exception as e:
             console.info(f"⚠️ Error cleaning today's data: {e}")
         
@@ -624,7 +611,7 @@ class FastTelegram:
             return False
 
 class MongoFlightBot:
-    """MongoDB-powered automated flight bot with 45-day cache"""
+    """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
     
     # Class constants for better memory usage
     Z_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
@@ -818,17 +805,18 @@ class MongoFlightBot:
             console.info(f"⚠️ Failed to send alert for {deal.destination}")
     
     def update_cache_and_detect_deals(self):
-        """Main automated method: updates MongoDB cache AND detects deals"""
+        """Main automated method: ALWAYS updates MongoDB cache AND detects deals"""
         self.total_start_time = time.time()
         
-        console.info("🤖 MONGODB FLIGHT BOT STARTED (45-DAY CACHE)")
-        console.info("=" * 55)
+        console.info("🤖 MONGODB FLIGHT BOT STARTED (ALWAYS UPDATES CACHE)")
+        console.info("=" * 60)
         
         months = self._generate_future_months()
         
         # Send startup notification
         startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
                       f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
+                      f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
                       f"⚡ Z-score ≥1.7 | Smart deduplication active\n"
@@ -837,12 +825,13 @@ class MongoFlightBot:
         if not self.telegram.send(startup_msg):
             console.info("⚠️ Failed to send startup notification")
         
-        # PHASE 1: UPDATE MONGODB CACHE
-        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (45-DAY WINDOW)")
+        # PHASE 1: UPDATE MONGODB CACHE (ALWAYS)
+        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (ALWAYS RUNS)")
         console.info("=" * 50)
         
         cache_start = time.time()
         try:
+            # ALWAYS perform cache update - no skipping logic
             self.cache.cache_daily_data(self.api, self.DESTINATIONS, months)
             cache_time = (time.time() - cache_start) / 60
             
@@ -858,6 +847,7 @@ class MongoFlightBot:
                         f"📊 Total entries: {cache_summary['total_entries']:,}\n"
                         f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
                         f"🗃️ 45-day rolling window (optimized for 512 MB)\n"
+                        f"⚡ FULL daily update performed\n"
                         f"☁️ Persistent cloud storage\n\n"
                         f"🚀 Starting deal detection...")
             
@@ -923,12 +913,13 @@ class MongoFlightBot:
         if not deals:
             summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                       f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                      f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
+                      f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
                       f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} required)\n\n"
                       f"🗃️ 45-day rolling cache (optimized)\n"
+                      f"⚡ ALWAYS updates cache - no skipping\n"
                       f"☁️ Persistent MongoDB Atlas storage\n"
                       f"🔄 Next run: Tomorrow (automated)")
             
@@ -946,7 +937,7 @@ class MongoFlightBot:
         
         summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                   f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                  f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
+                  f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
                   f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                   f"✅ **{len(deals)} DEALS FOUND**\n"
                   f"🔥 {exceptional} exceptional (Z≥{self.Z_THRESHOLDS['exceptional']})\n"
@@ -955,6 +946,7 @@ class MongoFlightBot:
                   f"📊 Average savings: {avg_savings:.0f}%\n"
                   f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
                   f"🎯 Smart deduplication active\n"
+                  f"⚡ ALWAYS updates cache - no skipping\n"
                   f"☁️ Persistent MongoDB Atlas cache\n\n"
                   f"🔄 Next run: Tomorrow (automated)")
         
@@ -962,7 +954,7 @@ class MongoFlightBot:
         console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
-        """Single command that does EVERYTHING with MongoDB"""
+        """Single command that does EVERYTHING with MongoDB - ALWAYS UPDATES"""
         try:
             # Clean up old alerts first
             self.cache.cleanup_old_alerts()
@@ -975,7 +967,8 @@ class MongoFlightBot:
             console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
-            console.info(f"🗃️ 45-day cache optimized for MongoDB Atlas")
+            console.info(f"🗃️ 45-day cache with FULL daily updates")
+            console.info(f"⚡ No cache skipping - always updates")
             console.info(f"☁️ Persistent storage maintained")
             
             self.send_final_summary(deals)
@@ -987,7 +980,7 @@ class MongoFlightBot:
             self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Main function for MongoDB-powered automation with 45-day cache"""
+    """Main function for MongoDB-powered automation with ALWAYS UPDATE cache"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
