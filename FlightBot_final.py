@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MongoDB Flight Bot - Cloud Database Version
-- Uses MongoDB Atlas for persistent 4-month cache
+MongoDB Flight Bot - Final Version with 45-Day Cache
+- Uses MongoDB Atlas for persistent 1.5-month cache (realistic for 512 MB)
 - Automated cache updates AND deal detection in one run
 - Z-score 1.7 threshold for ~50 deals/week
 - Smart deduplication: price drops allowed, weekly reset
@@ -145,13 +145,13 @@ class VerifiedDeal:
                 f"🔗 [Book Deal]({self.booking_link})")
 
 class MongoFlightCache:
-    """MongoDB-based flight cache with persistent 4-month rolling window"""
+    """MongoDB-based flight cache with persistent 45-day rolling window"""
     
     def __init__(self, connection_string: str):
         self.connection_string = connection_string
         self.client = None
         self.db = None
-        self.CACHE_DAYS = 120  # 4 months
+        self.CACHE_DAYS = 45  # 1.5 months (realistic for 512 MB MongoDB)
         self._connect()
     
     def _connect(self):
@@ -258,7 +258,7 @@ class MongoFlightCache:
         # Update statistics for all destinations that have data
         self._update_all_destination_stats()
         
-        # Clean up old data
+        # Clean up old data (keep 45-day window)
         self._manage_rolling_window(today)
         
         console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
@@ -305,12 +305,12 @@ class MongoFlightCache:
             console.info(f"⚠️ Error updating destination stats: {e}")
     
     def _manage_rolling_window(self, current_date: str):
-        """Remove data older than 4 months"""
+        """Remove data older than 45 days"""
         try:
             cutoff_date = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=self.CACHE_DAYS)).strftime('%Y-%m-%d')
             result = self.db.flight_data.delete_many({'cached_date': {'$lt': cutoff_date}})
             if result.deleted_count > 0:
-                console.info(f"🧹 Removed {result.deleted_count:,} old entries (keeping 4-month window)")
+                console.info(f"🧹 Removed {result.deleted_count:,} old entries (keeping 45-day window)")
         except Exception as e:
             console.info(f"⚠️ Error managing rolling window: {e}")
     
@@ -624,7 +624,7 @@ class FastTelegram:
             return False
 
 class MongoFlightBot:
-    """MongoDB-powered automated flight bot"""
+    """MongoDB-powered automated flight bot with 45-day cache"""
     
     # Class constants for better memory usage
     Z_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
@@ -821,25 +821,25 @@ class MongoFlightBot:
         """Main automated method: updates MongoDB cache AND detects deals"""
         self.total_start_time = time.time()
         
-        console.info("🤖 MONGODB FLIGHT BOT STARTED")
-        console.info("=" * 50)
+        console.info("🤖 MONGODB FLIGHT BOT STARTED (45-DAY CACHE)")
+        console.info("=" * 55)
         
         months = self._generate_future_months()
         
         # Send startup notification
         startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
-                      f"🗃️ Phase 1: MongoDB Cache Update\n"
+                      f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
                       f"⚡ Z-score ≥1.7 | Smart deduplication active\n"
-                      f"☁️ Persistent MongoDB Atlas cache")
+                      f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
         
         if not self.telegram.send(startup_msg):
             console.info("⚠️ Failed to send startup notification")
         
         # PHASE 1: UPDATE MONGODB CACHE
-        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE")
-        console.info("=" * 35)
+        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (45-DAY WINDOW)")
+        console.info("=" * 50)
         
         cache_start = time.time()
         try:
@@ -857,6 +857,7 @@ class MongoFlightBot:
                         f"⏱️ Time: {cache_time:.1f} minutes\n"
                         f"📊 Total entries: {cache_summary['total_entries']:,}\n"
                         f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
+                        f"🗃️ 45-day rolling window (optimized for 512 MB)\n"
                         f"☁️ Persistent cloud storage\n\n"
                         f"🚀 Starting deal detection...")
             
@@ -927,7 +928,8 @@ class MongoFlightBot:
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
                       f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} required)\n\n"
-                      f"☁️ Persistent MongoDB Atlas cache\n"
+                      f"🗃️ 45-day rolling cache (optimized)\n"
+                      f"☁️ Persistent MongoDB Atlas storage\n"
                       f"🔄 Next run: Tomorrow (automated)")
             
             self.telegram.send(summary)
@@ -951,7 +953,7 @@ class MongoFlightBot:
                   f"💎 {excellent} excellent (Z≥{self.Z_THRESHOLDS['excellent']})\n"
                   f"💰 {great} great (Z≥{self.Z_THRESHOLDS['great']})\n\n"
                   f"📊 Average savings: {avg_savings:.0f}%\n"
-                  f"🗃️ Database: {cache_summary['total_entries']:,} entries\n"
+                  f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
                   f"🎯 Smart deduplication active\n"
                   f"☁️ Persistent MongoDB Atlas cache\n\n"
                   f"🔄 Next run: Tomorrow (automated)")
@@ -973,7 +975,8 @@ class MongoFlightBot:
             console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
-            console.info(f"☁️ MongoDB Atlas cache persistent")
+            console.info(f"🗃️ 45-day cache optimized for MongoDB Atlas")
+            console.info(f"☁️ Persistent storage maintained")
             
             self.send_final_summary(deals)
             
@@ -984,7 +987,7 @@ class MongoFlightBot:
             self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Main function for MongoDB-powered automation"""
+    """Main function for MongoDB-powered automation with 45-day cache"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
