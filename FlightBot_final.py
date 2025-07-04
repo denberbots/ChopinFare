@@ -326,11 +326,11 @@ class MongoDBCache:
     def cleanup_old_data(self, days_old: int = 45):
         """Clean up old cached data (45-day rolling window)"""
         try:
-            cutoff_date = datetime.now() - timedelta(days=days_old)
+            cutoff_datetime = datetime.now() - timedelta(days=days_old)
             
             # Remove old flight data
             result = self.db.flight_data.delete_many({
-                'cached_date': {'$lt': cutoff_date}
+                'cached_date': {'$lt': cutoff_datetime}
             })
             if result.deleted_count > 0:
                 console.info(f"Cleaned up {result.deleted_count} old flight entries (45-day window)")
@@ -547,7 +547,7 @@ class FlightBot:
                             'destination': destination,
                             'outbound_date': departure_date.strftime('%Y-%m-%d'),
                             'return_date': return_date.strftime('%Y-%m-%d'),
-                            'cached_date': {'$gte': today - timedelta(days=7)}  # Cached within last week
+                            'cached_date': {'$gte': datetime.combine(today - timedelta(days=7), datetime.min.time())}
                         })
                         
                         if existing:
@@ -574,7 +574,7 @@ class FlightBot:
                                     'price': price,
                                     'outbound_date': departure_date.strftime('%Y-%m-%d'),
                                     'return_date': return_date.strftime('%Y-%m-%d'),
-                                    'cached_date': today,
+                                    'cached_date': datetime.now(),  # Use datetime instead of date
                                     'flight_id': flight.get('flight_number', ''),
                                     'duration': (return_date - departure_date).days,
                                     'currency': 'PLN'
