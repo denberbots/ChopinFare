@@ -776,10 +776,23 @@ class MongoFlightCache:
             'north_america_west': (1200, 5000)
         }
         
-        # Find destination region
-        from SmartAPI import SmartAPI
-        temp_api = SmartAPI("dummy", "dummy")
-        region = temp_api.ABSOLUTE_REGIONS.get(destination, 'europe_west')
+        # Simple region mapping for validation
+        absolute_regions = {
+            # Europe West
+            'CDG': 'europe_west', 'ORY': 'europe_west', 'LHR': 'europe_west', 'FCO': 'europe_west',
+            'MAD': 'europe_west', 'BCN': 'europe_west', 'AMS': 'europe_west', 'FRA': 'europe_west',
+            # Europe Close  
+            'ARN': 'europe_close', 'OSL': 'europe_close', 'CPH': 'europe_close', 'HEL': 'europe_close',
+            'PRG': 'europe_close', 'BUD': 'europe_close', 'SOF': 'europe_close', 'VAR': 'europe_close',
+            # Middle East
+            'DXB': 'middle_east_gulf', 'DOH': 'middle_east_gulf', 'IST': 'middle_east_close',
+            # Asia
+            'NRT': 'asia_east', 'ICN': 'asia_east', 'BKK': 'asia_southeast',
+            # Americas
+            'JFK': 'north_america_east', 'YYZ': 'north_america_east'
+        }
+        
+        region = absolute_regions.get(destination, 'europe_west')
         expected_min, expected_max = region_ranges.get(region, (200, 2000))
         
         # Check for corruption indicators
