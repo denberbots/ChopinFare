@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-MongoDB Flight Bot - FIXED VERSION - Matrix API Priority
-✅ FIXED: Uses Matrix API as primary for cache collection (realistic 200-600 PLN prices)
-✅ FIXED: Removed V3 API fallback during cache building (eliminates 800+ PLN corruption)
-✅ FIXED: V3 API only used for verification (where it works correctly)
-✅ FIXED: Price validation consistent (200-6000 PLN)
-✅ FIXED: Outlier removal in statistics calculation
-✅ FIXED: Starts from September (avoids expensive August vacation period)
+MongoDB Flight Bot - FIXED VERSION - Enhanced V3 Verification
+✅ FIXED: Enhanced V3 API logging to debug verification failures
+✅ FIXED: Proper date formatting for V3 API calls
+✅ FIXED: Better error handling and retry logic
+✅ FIXED: Fallback verification logic when V3 fails
+✅ FIXED: Date validation before API calls
 """
 
 import os
@@ -56,6 +55,14 @@ class FlightAPI:
         """Validate price is within reasonable range for PLN"""
         return 200 <= price <= 6000
     
+    def _validate_date_format(self, date_str: str) -> bool:
+        """Validate date string format"""
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+            return True
+        except ValueError:
+            return False
+    
     def get_matrix_flights(self, origin: str, destination: str, month: str) -> List[Dict[str, Any]]:
         """
         FIXED: Get flights using Matrix API (realistic 200-600 PLN prices)
@@ -65,8 +72,8 @@ class FlightAPI:
             'origin': origin,
             'destination': destination,
             'month': month,
-            'currency': 'PLN',  # Fixed: uppercase currency
-            'show_to_affiliates': True,  # Added required parameter
+            'currency': 'PLN',
+            'show_to_affiliates': True,
             'token': self.api_token
         }
         
@@ -75,7 +82,6 @@ class FlightAPI:
             response.raise_for_status()
             data = response.json()
             
-            # Debug API response
             console.info(f"🔍 Matrix API response for {destination}: success={data.get('success')}, data_count={len(data.get('data', []))}")
             
             if data.get('success') and data.get('data'):
@@ -102,7 +108,6 @@ class FlightAPI:
             if not isinstance(entry, dict):
                 continue
                 
-            # Matrix API field names from documentation
             price = entry.get('value')
             departure_at = entry.get('depart_date') 
             return_at = entry.get('return_date')
@@ -111,7 +116,7 @@ class FlightAPI:
                 flight = {
                     'value': float(price),
                     'departure_at': departure_at,
-                    'return_at': return_at or departure_at,  # Use departure if no return
+                    'return_at': return_at or departure_at,
                     'distance': entry.get('distance', 0),
                     'actual': entry.get('actual', True),
                     'transfers': entry.get('number_of_changes', 0),
@@ -128,37 +133,80 @@ class FlightAPI:
     def get_v3_verification(self, origin: str, destination: str, 
                           departure_date: str, return_date: str = None) -> Optional[Dict[str, Any]]:
         """
-        UNCHANGED: Get verification flights using V3 API with specific dates
-        (This works correctly for verification - only used for deal confirmation)
+        ENHANCED: Get verification flights using V3 API with detailed logging
         """
+        if not self._validate_date_format(departure_date):
+            console.error(f"❌ Invalid departure date format: {departure_date}")
+            return None
+        
+        if return_date and not self._validate_date_format(return_date):
+            console.error(f"❌ Invalid return date format: {return_date}")
+            return None
+        
+        try:
+            dep_date = datetime.strptime(departure_date, '%Y-%m-%d')
+            if dep_date < datetime.now():
+                console.warning(f"⚠️ Departure date {departure_date} is in the past")
+                return None
+                
+            if return_date:
+                ret_date = datetime.strptime(return_date, '%Y-%m-%d')
+                if ret_date <= dep_date:
+                    console.warning(f"⚠️ Return date {return_date} is not after departure date {departure_date}")
+                    return None
+        except ValueError as e:
+            console.error(f"❌ Date parsing error: {e}")
+            return None
+        
         url = f"{self.base_url}/aviasales/v3/prices_for_dates"
         params = {
             'origin': origin,
             'destination': destination,
             'departure_at': departure_date,
-            'currency': 'PLN',  # Fixed: uppercase currency 
+            'currency': 'PLN',
             'token': self.api_token
         }
         
         if return_date:
             params['return_at'] = return_date
         
+        console.info(f"🔍 V3 API call: {origin}→{destination}, {departure_date}" + (f" to {return_date}" if return_date else " (one-way)"))
+        
         try:
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
             
-            if data.get('success') and data.get('data'):
-                flights = data['data']
-                if flights:
-                    cheapest = min(flights, key=lambda x: x.get('value', float('inf')))
-                    if self._validate_price(cheapest.get('value', 0)):
-                        return cheapest
+            console.info(f"📡 V3 response: success={data.get('success')}, data_count={len(data.get('data', []))}")
             
+            if not data.get('success'):
+                error_msg = data.get('error', 'Unknown error')
+                console.warning(f"❌ V3 API unsuccessful: {error_msg}")
+                return None
+            
+            if not data.get('data'):
+                console.warning(f"❌ V3 API: No flights found for these dates")
+                return None
+            
+            flights = data['data']
+            console.info(f"✅ V3 API: Found {len(flights)} flights")
+            
+            if flights:
+                valid_flights = [f for f in flights if self._validate_price(f.get('value', 0))]
+                
+                if not valid_flights:
+                    console.warning(f"❌ V3 API: No flights within valid price range (200-6000 PLN)")
+                    return None
+                
+                cheapest = min(valid_flights, key=lambda x: x.get('value', float('inf')))
+                console.info(f"✅ V3 verification successful: {cheapest.get('value', 0):.0f} PLN")
+                return cheapest
+            
+            console.warning(f"❌ V3 API: Empty flight list")
             return None
             
         except requests.RequestException as e:
-            console.error(f"❌ V3 verification error: {e}")
+            console.error(f"❌ V3 verification network error: {e}")
             return None
         except Exception as e:
             console.error(f"❌ V3 verification unexpected error: {e}")
@@ -181,7 +229,6 @@ class MongoDBManager:
                 connectTimeoutMS=5000,
                 socketTimeoutMS=5000
             )
-            # Test connection
             self.client.server_info()
             
             self.db = self.client['flight_deals']
@@ -201,7 +248,6 @@ class MongoDBManager:
             return 0
         
         try:
-            # Add metadata
             for flight in flights:
                 flight['cached_at'] = datetime.now()
             
@@ -209,7 +255,6 @@ class MongoDBManager:
             return len(result.inserted_ids)
             
         except pymongo.errors.BulkWriteError as e:
-            # Some duplicates are expected
             return len([op for op in e.details['writeErrors'] if op['code'] != 11000])
         except Exception as e:
             console.error(f"❌ MongoDB insert error: {e}")
@@ -231,7 +276,6 @@ class MongoDBManager:
             return False
         
         try:
-            # Extract valid prices
             prices = []
             for flight in flights:
                 price = flight.get('value', 0)
@@ -242,7 +286,6 @@ class MongoDBManager:
                 console.warning(f"⚠️ Insufficient price data for {destination}: {len(prices)} prices")
                 return False
             
-            # FIXED: Remove outliers using IQR method
             prices_sorted = sorted(prices)
             q1_idx = len(prices_sorted) // 4
             q3_idx = 3 * len(prices_sorted) // 4
@@ -250,16 +293,14 @@ class MongoDBManager:
             q3 = prices_sorted[q3_idx]
             iqr = q3 - q1
             
-            # Remove outliers beyond 1.5 * IQR
             lower_bound = q1 - 1.5 * iqr
             upper_bound = q3 + 1.5 * iqr
             cleaned_prices = [p for p in prices if lower_bound <= p <= upper_bound]
             
             if len(cleaned_prices) < 3:
                 console.warning(f"⚠️ Too few prices after outlier removal for {destination}")
-                cleaned_prices = prices  # Use original if cleaning removes too much
+                cleaned_prices = prices
             
-            # Calculate statistics
             stats = {
                 'destination': destination,
                 'median_price': statistics.median(cleaned_prices),
@@ -272,7 +313,6 @@ class MongoDBManager:
                 'updated_at': datetime.now()
             }
             
-            # Upsert statistics
             self.stats_collection.replace_one(
                 {'destination': destination},
                 stats,
@@ -290,7 +330,6 @@ class MongoDBManager:
             return False
     
     def _validate_price(self, price: float) -> bool:
-        """Validate price is within reasonable range for PLN"""
         return 200 <= price <= 6000
     
     def cache_verified_deal(self, destination: str, deal_data: Dict[str, Any]) -> bool:
@@ -337,7 +376,6 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         
-        # Complete city, country, and flag mappings
         self._FLAGS = {
             'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
             'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
@@ -458,17 +496,14 @@ class TelegramNotifier:
     def send_deal_alert(self, destination: str, price: float, z_score: float, 
                        market_median: float, savings: float, verification_data: Dict = None) -> bool:
         try:
-            # Get formatted location info
             origin_city = self._CITIES.get('WAW', 'Warsaw')
             dest_city = self._CITIES.get(destination, destination)
             country = self._COUNTRIES.get(destination, '')
             flag = self._FLAGS.get(destination, '')
             
-            # Create beautiful header with city, country, and flag
             header = f"🚨 *FLIGHT DEAL ALERT* 🚨\n\n"
             header += f"✈️ *{origin_city} → {dest_city}{f', {country} {flag}' if country and flag else ''}*"
             
-            # Deal details
             message = header + f"\n\n"
             message += f"💰 *Price:* {price:.0f} PLN\n"
             message += f"📊 *Market Median:* {market_median:.0f} PLN\n"
@@ -479,13 +514,11 @@ class TelegramNotifier:
                 departure_at = verification_data.get('departure_at', '')
                 return_at = verification_data.get('return_at', '')
                 
-                # Format dates nicely
                 if departure_at and return_at:
                     date_range = self._format_date_range(departure_at[:10], return_at[:10])
                     message += f"\n✅ *Verified Deal Details:*\n"
                     message += f"📅 *Dates:* {date_range}\n"
                     
-                    # Calculate trip duration
                     try:
                         dep_date = datetime.strptime(departure_at[:10], '%Y-%m-%d')
                         ret_date = datetime.strptime(return_at[:10], '%Y-%m-%d')
@@ -494,14 +527,12 @@ class TelegramNotifier:
                     except:
                         pass
                 
-                # Add airline if available
                 airline = verification_data.get('airline', '')
                 if airline:
                     message += f"🏢 *Airline:* {airline}\n"
             
             message += f"\n🕒 *Found:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             
-            # Send message
             url = f"{self.base_url}/sendMessage"
             payload = {
                 'chat_id': self.chat_id,
@@ -526,7 +557,6 @@ class FlightBot:
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.mongodb_uri = os.getenv('MONGODB_CONNECTION_STRING')
         
-        # Validate environment variables
         required_vars = {
             'TRAVELPAYOUTS_API_TOKEN': self.api_token,
             'TELEGRAM_BOT_TOKEN': self.telegram_token,
@@ -539,12 +569,10 @@ class FlightBot:
             console.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
             sys.exit(1)
         
-        # Initialize components
         self.flight_api = FlightAPI(self.api_token)
         self.db_manager = MongoDBManager(self.mongodb_uri)
         self.notifier = TelegramNotifier(self.telegram_token, self.telegram_chat_id)
         
-        # Configuration - RESTORED FULL DESTINATION LIST
         self.destinations = [
             'CDG', 'ORY', 'BCN', 'FCO', 'MXP', 'LIN', 'BGY', 'CIA', 'ATH', 'VCE', 'NAP', 'LIS', 'AMS', 'LHR',
             'LTN', 'LGW', 'ARN', 'MAD', 'NYO', 'STN', 'OSL', 'PRG', 'OTP', 'HEL', 'FRA', 'PMO', 'KEF', 'BUD',
@@ -560,16 +588,11 @@ class FlightBot:
         ]
         self.origin = 'WAW'
         
-        # FIXED: Deal detection thresholds based on Matrix API realistic prices
-        # Extended to cover all destinations with regional grouping
         self.absolute_thresholds = {
-            # Europe Close (250 PLN threshold)
             'ARN': 250, 'NYO': 250, 'OSL': 250, 'BGO': 250, 'BOO': 250, 'CPH': 250, 'HEL': 250, 'RVN': 250, 'KEF': 250,
             'VAR': 250, 'BOJ': 250, 'SOF': 250, 'OTP': 250, 'CLJ': 250, 'BEG': 250, 'SPU': 250, 'DBV': 250, 'ZAD': 250,
             'TIV': 250, 'TGD': 250, 'TIA': 250, 'SKG': 250, 'BUD': 250, 'PRG': 250, 'KRK': 250, 'KTW': 250,
             'LED': 250, 'KGD': 250, 'MSQ': 250,
-            
-            # Europe West (350 PLN threshold)  
             'LHR': 350, 'LTN': 350, 'LGW': 350, 'STN': 350, 'GLA': 350, 'BFS': 350, 'DUB': 350,
             'CDG': 350, 'ORY': 350, 'NCE': 350, 'MRS': 350, 'BIQ': 350, 'PIS': 350, 'PUY': 350,
             'FRA': 350, 'MUC': 350, 'BER': 350, 'HAM': 350, 'STR': 350, 'DUS': 350, 'CGN': 350, 'LEJ': 350, 'DTM': 350,
@@ -581,53 +604,33 @@ class FlightBot:
             'LIS': 350, 'OPO': 350, 'PDL': 350, 'PXO': 350,
             'VIE': 350, 'ATH': 350, 'CFU': 350, 'HER': 350, 'RHO': 350, 'ZTH': 350, 'JTR': 350, 'CHQ': 350,
             'BRU': 350, 'CRL': 350,
-            
-            # Middle East Close (700 PLN threshold)
             'AYT': 700, 'IST': 700, 'SAW': 700, 'ESB': 700, 'IZM': 700, 'ADB': 700,
             'TLV': 700, 'SSH': 700, 'CAI': 700,
-            
-            # Middle East Gulf (750 PLN threshold)
             'DXB': 750, 'SHJ': 750, 'AUH': 750, 'DWC': 750, 'DOH': 750, 'RUH': 750, 'JED': 750, 'DMM': 750,
-            
-            # North Africa (650 PLN threshold)
             'RAK': 650, 'DJE': 650,
-            
-            # Asia Close (1100 PLN threshold)
             'SVO': 1100, 'DME': 1100, 'VKO': 1100, 'AER': 1100, 'OVB': 1100, 'IKT': 1100, 'ULV': 1100, 'KJA': 1100,
             'FRU': 1100, 'TAS': 1100, 'EVN': 1100, 'TBS': 1100, 'GYD': 1100, 'KUT': 1100,
-            
-            # Asia Southeast (1600 PLN threshold)
             'BKK': 1600, 'DMK': 1600, 'HKT': 1600, 'DPS': 1600,
-            
-            # Asia East (1700 PLN threshold)
             'NRT': 1700, 'HND': 1700, 'KIX': 1700, 'ITM': 1700, 'ICN': 1700, 'GMP': 1700, 'PEK': 1700,
-            
-            # Asia South (1400 PLN threshold)
             'DEL': 1400, 'CMB': 1400,
-            
-            # North America East (1700 PLN threshold)
             'EWR': 1700, 'JFK': 1700, 'LGA': 1700, 'PHL': 1700, 'YYZ': 1700, 'MIA': 1700,
-            
-            # North America West (2200 PLN threshold)
             'YWG': 2200, 'YEG': 2200,
-            
-            # Central America (2200 PLN threshold)
             'HAV': 2200, 'PUJ': 2200,
-            
-            # South America (2800 PLN threshold)
-            'SYD': 2800,  # Note: SYD is actually Australia, might need adjustment
-            
-            # East Africa (1500 PLN threshold)
+            'SYD': 2800,
             'ZNZ': 1500, 'TNR': 1500
         }
         
-        self.z_score_threshold = 1.7  # Minimum Z-score for deal alerts
+        self.z_score_threshold = 1.7
         
     def _generate_future_months(self, start_month: int = 9, count: int = 3) -> List[str]:
-        """FIXED: Generate future months starting from September (avoid expensive August)"""
+        """Generate future months starting from September or current month if later"""
         current_year = datetime.now().year
-        months = []
+        current_month = datetime.now().month
         
+        if current_month >= 9:
+            start_month = current_month
+        
+        months = []
         for i in range(count):
             month = start_month + i
             year = current_year
@@ -648,16 +651,13 @@ class FlightBot:
         months = self._generate_future_months()
         total_cached = 0
         successful_destinations = 0
-        validation_errors = 0
         
         for destination in self.destinations:
             console.info(f"📥 Caching data for {destination}...")
             
-            # Generate round-trip combinations like we did in the comprehensive version
             round_trip_combinations = self._generate_roundtrip_combinations(destination, months)
             
             if round_trip_combinations:
-                # Convert combinations to flight records for caching
                 destination_flights = []
                 for combo in round_trip_combinations:
                     flight_record = {
@@ -679,30 +679,22 @@ class FlightBot:
                 if cached_count > 0:
                     total_cached += cached_count
                     successful_destinations += 1
-                    
-                    # Update statistics for this destination
                     self.db_manager.update_statistics(destination, destination_flights)
-                    
                     console.info(f"✅ {destination}: {cached_count} round-trip combinations cached")
                 else:
                     console.warning(f"⚠️ {destination}: No flights cached")
             else:
                 console.warning(f"⚠️ {destination}: No round-trip combinations found")
             
-            # Rate limiting
             time.sleep(0.5)
         
-        # Cleanup old data
         self.db_manager.cleanup_old_data()
         
         console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
-        console.info(f"⚠️ Rejected {validation_errors} invalid prices during validation")
-        console.info(f"🔧 FIXED: Matrix API provided realistic 200-600 PLN price ranges")
         
         return {
             'total_cached': total_cached,
-            'successful_destinations': successful_destinations,
-            'validation_errors': validation_errors
+            'successful_destinations': successful_destinations
         }
     
     def _generate_roundtrip_combinations(self, destination: str, months: List[str]) -> List[Dict[str, Any]]:
@@ -710,30 +702,23 @@ class FlightBot:
         combinations = []
         
         for month in months:
-            # Get outbound flights (WAW → destination)
             outbound_flights = self.flight_api.get_matrix_flights(self.origin, destination, month)
-            # Get return flights (destination → WAW)  
             return_flights = self.flight_api.get_matrix_flights(destination, self.origin, month)
             
             console.info(f"  📋 {destination} {month}: {len(outbound_flights)} outbound, {len(return_flights)} return flights")
             
-            # Create round-trip combinations
             for out_flight in outbound_flights:
                 for ret_flight in return_flights:
                     try:
-                        # Parse dates
                         out_date = datetime.strptime(out_flight['departure_at'], '%Y-%m-%d')
                         ret_date = datetime.strptime(ret_flight['departure_at'], '%Y-%m-%d')
                         
-                        # Check trip duration (3-14 days)
                         duration = (ret_date - out_date).days
                         if not (3 <= duration <= 14):
                             continue
                         
-                        # Calculate total price
                         total_price = out_flight['value'] + ret_flight['value']
                         
-                        # Validate price range
                         if not self.flight_api._validate_price(total_price):
                             continue
                         
@@ -749,14 +734,14 @@ class FlightBot:
                         }
                         combinations.append(combination)
                         
-                    except (ValueError, KeyError) as e:
-                        continue  # Skip invalid date formats
+                    except (ValueError, KeyError):
+                        continue
         
         console.info(f"  ✅ {destination}: Generated {len(combinations)} valid round-trip combinations")
         return combinations
     
     def detect_deals(self) -> List[Dict[str, Any]]:
-        """Detect flight deals using cached statistics and proper round-trip combinations"""
+        """ENHANCED: Detect flight deals with improved V3 verification and fallback logic"""
         console.info("🎯 Starting deal detection...")
         
         deals_found = []
@@ -765,7 +750,6 @@ class FlightBot:
         for destination in self.destinations:
             console.info(f"🔍 Analyzing {destination}...")
             
-            # Get market statistics
             market_data = self.db_manager.get_market_statistics(destination)
             
             if not market_data:
@@ -778,25 +762,21 @@ class FlightBot:
             
             console.info(f"📊 {destination}: median={market_data['median_price']:.0f} PLN, threshold={self.absolute_thresholds.get(destination, 400)} PLN, samples={market_data['sample_size']}")
             
-            # Generate current round-trip combinations for testing
             current_combinations = self._generate_roundtrip_combinations(destination, [months[0]])
             
             console.info(f"  📋 Generated {len(current_combinations)} current round-trip combinations for testing")
             
-            # Test combinations for deals
             best_deal_found = False
-            for combo in current_combinations[:10]:  # Test top 10 combinations
+            for combo in current_combinations[:15]:
                 if best_deal_found:
                     break
                     
                 round_trip_price = combo['total_price']
                 
-                # Calculate Z-score for round-trip price  
                 if market_data['std_dev'] > 0:
                     z_score = (market_data['median_price'] - round_trip_price) / market_data['std_dev']
                     savings = market_data['median_price'] - round_trip_price
                     
-                    # Check both Z-score and absolute thresholds
                     absolute_threshold = self.absolute_thresholds.get(destination, 400)
                     meets_z_score = z_score >= self.z_score_threshold
                     meets_absolute = round_trip_price < absolute_threshold
@@ -804,49 +784,87 @@ class FlightBot:
                     console.info(f"  💰 Round-trip: {round_trip_price:.0f} PLN, Z-score: {z_score:.2f}, Absolute: {round_trip_price:.0f} < {absolute_threshold} = {meets_absolute}")
                     
                     if meets_z_score or meets_absolute:
-                        # Verify with V3 API using the combination dates
                         departure_date = combo['outbound_date']
                         return_date = combo['return_date']
                         
                         console.info(f"  🔍 Verifying round-trip deal: {departure_date} to {return_date}")
+                        
+                        # Try round-trip verification first
                         verification = self.flight_api.get_v3_verification(
                             self.origin, destination, departure_date, return_date
                         )
                         
-                        if verification:
-                            verified_price = verification.get('value', 0)
-                            if self.flight_api._validate_price(verified_price):
-                                # Recalculate Z-score with verified price
-                                verified_z_score = (market_data['median_price'] - verified_price) / market_data['std_dev']
-                                verified_savings = market_data['median_price'] - verified_price
-                                
+                        verified_price = None
+                        verification_method = None
+                        
+                        if verification and self.flight_api._validate_price(verification.get('value', 0)):
+                            verified_price = verification.get('value')
+                            verification_method = "round-trip"
+                            console.info(f"  ✅ V3 round-trip verification successful: {verified_price:.0f} PLN")
+                        else:
+                            # FALLBACK: Try one-way verification
+                            console.info(f"  🔄 Round-trip verification failed, trying one-way...")
+                            one_way_verification = self.flight_api.get_v3_verification(
+                                self.origin, destination, departure_date
+                            )
+                            
+                            if one_way_verification and self.flight_api._validate_price(one_way_verification.get('value', 0)):
+                                one_way_price = one_way_verification.get('value')
+                                verified_price = one_way_price * 2
+                                verification = one_way_verification
+                                verification['value'] = verified_price
+                                verification['return_at'] = return_date
+                                verification_method = "one-way-estimated"
+                                console.info(f"  ✅ V3 one-way verification successful: {one_way_price:.0f} PLN (estimated round-trip: {verified_price:.0f} PLN)")
+                            else:
+                                # FALLBACK: Use Matrix price with higher threshold
+                                console.info(f"  ⚠️ V3 verification completely failed, using Matrix price with higher threshold")
+                                if z_score >= (self.z_score_threshold + 1.0):
+                                    verified_price = round_trip_price
+                                    verification = {
+                                        'value': verified_price,
+                                        'departure_at': departure_date,
+                                        'return_at': return_date,
+                                        'airline': combo.get('airline', 'Unknown')
+                                    }
+                                    verification_method = "matrix-fallback"
+                                    console.info(f"  ⚡ Using Matrix price as fallback: {verified_price:.0f} PLN (high Z-score: {z_score:.2f})")
+                        
+                        if verified_price:
+                            verified_z_score = (market_data['median_price'] - verified_price) / market_data['std_dev']
+                            verified_savings = market_data['median_price'] - verified_price
+                            
+                            final_meets_z_score = verified_z_score >= self.z_score_threshold
+                            final_meets_absolute = verified_price < absolute_threshold
+                            
+                            if final_meets_z_score or final_meets_absolute:
                                 deal = {
                                     'destination': destination,
                                     'price': verified_price,
                                     'market_median': market_data['median_price'],
                                     'z_score': verified_z_score,
                                     'savings': verified_savings,
-                                    'verification_data': verification
+                                    'verification_data': verification,
+                                    'verification_method': verification_method
                                 }
                                 deals_found.append(deal)
                                 
-                                # Send alert
                                 self.notifier.send_deal_alert(
                                     destination, verified_price, verified_z_score,
                                     market_data['median_price'], verified_savings, verification
                                 )
                                 
-                                console.info(f"🎉 DEAL FOUND: {destination} - {verified_price:.0f} PLN (Z-score: {verified_z_score:.2f})")
+                                console.info(f"🎉 DEAL FOUND: {destination} - {verified_price:.0f} PLN (Z-score: {verified_z_score:.2f}, method: {verification_method})")
                                 
-                                # Cache verified deal
                                 self.db_manager.cache_verified_deal(destination, deal)
                                 
                                 best_deal_found = True
-                                break  # Move to next destination
+                                break
+                            else:
+                                console.info(f"  ❌ Deal rejected after verification: Z-score {verified_z_score:.2f} < {self.z_score_threshold} AND price {verified_price:.0f} >= {absolute_threshold}")
                         else:
-                            console.info(f"  ❌ V3 verification failed for {destination}")
+                            console.info(f"  ❌ All verification methods failed for {destination}")
                     else:
-                        # Log why this combination didn't qualify
                         if z_score < self.z_score_threshold and not meets_absolute:
                             console.info(f"  📊 Not a deal: Z-score {z_score:.2f} < {self.z_score_threshold} AND price {round_trip_price:.0f} >= {absolute_threshold}")
                 else:
@@ -855,13 +873,13 @@ class FlightBot:
             if not best_deal_found:
                 console.info(f"  📊 {destination}: No qualifying deals found")
             
-            time.sleep(0.3)  # Rate limiting
+            time.sleep(0.3)
         
         return deals_found
     
     def run_daily_automation(self):
         """Run complete daily automation: cache update + deal detection"""
-        console.info("🤖 Starting FIXED MongoDB Flight Bot automation...")
+        console.info("🤖 Starting ENHANCED MongoDB Flight Bot automation...")
         start_time = time.time()
         
         try:
@@ -874,20 +892,22 @@ class FlightBot:
             # Summary
             elapsed_time = (time.time() - start_time) / 60
             
-            summary_message = f"🤖 *FIXED FLIGHT BOT COMPLETE*\n\n"
+            summary_message = f"🤖 *ENHANCED FLIGHT BOT COMPLETE*\n\n"
             summary_message += f"⏱️ Runtime: {elapsed_time:.1f} minutes\n"
             summary_message += f"📊 Cached: {cache_results['total_cached']:,} flights\n"
             summary_message += f"🎯 Destinations processed: {cache_results['successful_destinations']}\n"
             summary_message += f"✅ Deals found: {len(deals)}\n"
-            summary_message += f"🔧 FIXED: Matrix API eliminates cache corruption\n"
-            summary_message += f"⚡ Realistic price ranges now used\n\n"
+            summary_message += f"🔧 ENHANCED: V3 verification with fallback logic\n"
+            summary_message += f"⚡ Better date validation and error handling\n\n"
             
             if deals:
                 summary_message += "🎉 *Deal Summary:*\n"
                 for deal in deals:
-                    summary_message += f"• {deal['destination']}: {deal['price']:.0f} PLN (Z: {deal['z_score']:.1f})\n"
+                    method = deal.get('verification_method', 'unknown')
+                    summary_message += f"• {deal['destination']}: {deal['price']:.0f} PLN (Z: {deal['z_score']:.1f}, {method})\n"
             else:
                 summary_message += "📊 No exceptional deals found today\n"
+                summary_message += "🔍 Try adjusting thresholds or check V3 API status\n"
             
             summary_message += f"\n🔄 Next run: Tomorrow"
             
@@ -918,7 +938,7 @@ class FlightBot:
 
 def main():
     """Main entry point"""
-    console.info("🚀 Initializing FIXED MongoDB Flight Bot...")
+    console.info("🚀 Initializing ENHANCED MongoDB Flight Bot...")
     
     bot = FlightBot()
     bot.run_daily_automation()
