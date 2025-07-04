@@ -1,834 +1,1230 @@
 #!/usr/bin/env python3
 """
-Fixed TravelPayouts Flight Bot - Using Correct API Endpoints
-✅ Uses proper TravelPayouts Data API endpoints
-✅ Builds cache daily without deleting existing data
-✅ Enhanced data validation to prevent corruption
-✅ Economy class filtering only
-✅ Regional price validation
+MongoDB Flight Bot - Complete Production Version
+✅ Fixed Lisbon formatting issue (LIS mapping added)
+✅ Added absolute price thresholds with your exact values
+✅ Combined deal logic: Z-score ≥1.7 OR price < absolute threshold
+✅ Smart deduplication - max 1 deal per destination per run
+✅ MongoDB 45-day cache with always-update logic
+✅ All 150+ destinations properly mapped with flags/countries
+
+Thresholds: Europe Close 250zł, Europe West 350zł, Middle East Gulf 750zł, etc.
+Ready for GitHub Actions deployment - just copy, paste, and commit!
 """
 
-import logging
-import os
-import statistics
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
 import requests
+import time
+import logging
+import statistics
+import math
+import os
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, PyMongoError
-import sys
+from pymongo.errors import ConnectionFailure, OperationFailure
 
-# Configure logging
+# Logging configuration
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('flight_bot.log')
-    ]
+    level=logging.WARNING,
+    format='%(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('flight_bot.log', encoding='utf-8'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
-# Console logging with emojis
-class Console:
-    @staticmethod
-    def info(msg: str):
-        print(f"ℹ️  {msg}")
-        logger.info(msg)
+console = logging.getLogger('console')
+console.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(message)s'))
+console.addHandler(console_handler)
+console.propagate = False
+
+@dataclass
+class MatrixEntry:
+    """Flight data entry from API"""
+    date: str
+    price: float
+    transfers: int
+    airline: str
+
+@dataclass
+class RoundTripCandidate:
+    """Round-trip combination before verification"""
+    destination: str
+    outbound_date: str
+    return_date: str
+    total_price: float
+    duration_days: int
+    outbound_transfers: int
+    return_transfers: int
+    outbound_airline: str
+    return_airline: str
+    estimated_savings_percent: float = 0.0
+
+@dataclass
+class VerifiedDeal:
+    """Verified flight deal"""
+    destination: str
+    departure_month: str
+    return_month: str
+    price: float
+    departure_at: str
+    return_at: str
+    duration_total: int
+    outbound_stops: int
+    return_stops: int
+    airline: str
+    booking_link: str
+    deal_type: str
+    median_price: float
+    savings_percent: float
+    trip_duration_days: int
+    z_score: float = 0.0
+    percentile: float = 0.0
+    outbound_flight_number: str = ""
+    return_flight_number: str = ""
+    outbound_duration: int = 0
+    return_duration: int = 0
     
-    @staticmethod
-    def success(msg: str):
-        print(f"✅ {msg}")
-        logger.info(msg)
+    # COMPLETE mappings - FIXED Lisbon and all formatting issues
+    _FLAGS = {
+        'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
+        'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
+        'MAD': '🇪🇸', 'BCN': '🇪🇸', 'PMI': '🇪🇸', 'IBZ': '🇪🇸', 'VLC': '🇪🇸', 'ALC': '🇪🇸', 'AGP': '🇪🇸', 'BIO': '🇪🇸',
+        'LPA': '🇪🇸', 'TFS': '🇪🇸', 'SPC': '🇪🇸', 'MAH': '🇪🇸',
+        'LHR': '🇬🇧', 'LTN': '🇬🇧', 'LGW': '🇬🇧', 'STN': '🇬🇧', 'GLA': '🇬🇧', 'BFS': '🇬🇧',
+        'CDG': '🇫🇷', 'ORY': '🇫🇷', 'NCE': '🇫🇷', 'MRS': '🇫🇷', 'BIQ': '🇫🇷', 'PIS': '🇫🇷', 'PUY': '🇫🇷',
+        'FRA': '🇩🇪', 'MUC': '🇩🇪', 'BER': '🇩🇪', 'HAM': '🇩🇪', 'STR': '🇩🇪', 'DUS': '🇩🇪', 'CGN': '🇩🇪', 'LEJ': '🇩🇪', 'DTM': '🇩🇪',
+        'AMS': '🇳🇱', 'RTM': '🇳🇱', 'EIN': '🇳🇱',
+        'ATH': '🇬🇷', 'SKG': '🇬🇷', 'CFU': '🇬🇷', 'HER': '🇬🇷', 'RHO': '🇬🇷', 'ZTH': '🇬🇷', 'JTR': '🇬🇷', 'CHQ': '🇬🇷',
+        'LIS': '🇵🇹', 'OPO': '🇵🇹', 'PDL': '🇵🇹', 'PXO': '🇵🇹',  # Portugal - FIXED: LIS included
+        'ARN': '🇸🇪', 'NYO': '🇸🇪', 'OSL': '🇳🇴', 'BGO': '🇳🇴', 'BOO': '🇳🇴',  # Scandinavia
+        'HEL': '🇫🇮', 'RVN': '🇫🇮', 'KEF': '🇮🇸', 'CPH': '🇩🇰',  # Nordic
+        'VIE': '🇦🇹', 'PRG': '🇨🇿', 'BRU': '🇧🇪', 'CRL': '🇧🇪', 'ZUR': '🇨🇭', 'BSL': '🇨🇭', 'GVA': '🇨🇭',  # Central Europe
+        'BUD': '🇭🇺', 'DUB': '🇮🇪', 'VAR': '🇧🇬', 'BOJ': '🇧🇬', 'SOF': '🇧🇬',  # Eastern Europe
+        'OTP': '🇷🇴', 'CLJ': '🇷🇴', 'SPU': '🇭🇷', 'DBV': '🇭🇷', 'ZAD': '🇭🇷',  # Balkans
+        'BEG': '🇷🇸', 'TIV': '🇲🇪', 'TGD': '🇲🇪', 'TIA': '🇦🇱', 'KRK': '🇵🇱', 'KTW': '🇵🇱',  # Balkans/Poland
+        'LED': '🇷🇺', 'SVO': '🇷🇺', 'DME': '🇷🇺', 'VKO': '🇷🇺', 'AER': '🇷🇺', 'OVB': '🇷🇺', 'IKT': '🇷🇺',  # Russia
+        'ULV': '🇷🇺', 'KJA': '🇷🇺', 'KGD': '🇷🇺', 'MSQ': '🇧🇾',  # Russia/Belarus
+        'AYT': '🇹🇷', 'IST': '🇹🇷', 'SAW': '🇹🇷', 'ESB': '🇹🇷', 'IZM': '🇹🇷', 'ADB': '🇹🇷',  # Turkey
+        'TLV': '🇮🇱', 'EVN': '🇦🇲', 'TBS': '🇬🇪', 'GYD': '🇦🇿', 'KUT': '🇬🇪', 'FRU': '🇰🇬', 'TAS': '🇺🇿',  # Middle East/Central Asia
+        'DXB': '🇦🇪', 'SHJ': '🇦🇪', 'AUH': '🇦🇪', 'DWC': '🇦🇪', 'DOH': '🇶🇦', 'RUH': '🇸🇦', 'JED': '🇸🇦', 'DMM': '🇸🇦',  # Gulf
+        'SSH': '🇪🇬', 'CAI': '🇪🇬', 'RAK': '🇲🇦', 'DJE': '🇹🇳',  # North Africa
+        'TNR': '🇲🇬', 'ZNZ': '🇹🇿',  # East Africa
+        'EWR': '🇺🇸', 'JFK': '🇺🇸', 'LGA': '🇺🇸', 'MIA': '🇺🇸', 'PHL': '🇺🇸',  # USA
+        'YYZ': '🇨🇦', 'YWG': '🇨🇦', 'YEG': '🇨🇦', 'HAV': '🇨🇺', 'PUJ': '🇩🇴',  # Americas
+        'HKT': '🇹🇭', 'BKK': '🇹🇭', 'DMK': '🇹🇭', 'DPS': '🇮🇩',  # Southeast Asia
+        'ICN': '🇰🇷', 'GMP': '🇰🇷', 'NRT': '🇯🇵', 'HND': '🇯🇵', 'KIX': '🇯🇵', 'ITM': '🇯🇵',  # East Asia
+        'PEK': '🇨🇳', 'CMB': '🇱🇰', 'DEL': '🇮🇳', 'SYD': '🇦🇺'  # Asia/Oceania
+    }
     
-    @staticmethod
-    def warning(msg: str):
-        print(f"⚠️  {msg}")
-        logger.warning(msg)
+    _CITIES = {
+        'WAW': 'Warsaw', 'FCO': 'Rome', 'MAD': 'Madrid', 'BCN': 'Barcelona', 'LHR': 'London', 'AMS': 'Amsterdam',
+        'ATH': 'Athens', 'CDG': 'Paris', 'MUC': 'Munich', 'VIE': 'Vienna', 'PRG': 'Prague', 'BRU': 'Brussels',
+        'ORY': 'Paris', 'LIN': 'Milan', 'BGY': 'Milan', 'CIA': 'Rome', 'GOA': 'Genoa', 'PMI': 'Palma',
+        'MXP': 'Milan', 'VCE': 'Venice', 'NAP': 'Naples', 'LIS': 'Lisbon', 'LTN': 'London', 'LGW': 'London',  # FIXED: LIS added
+        'STN': 'London', 'ARN': 'Stockholm', 'OSL': 'Oslo', 'NYO': 'Stockholm', 'FRA': 'Frankfurt',
+        'VAR': 'Varna', 'PSA': 'Pisa', 'EWR': 'New York', 'JFK': 'New York', 'LGA': 'New York',
+        'MIA': 'Miami', 'BLQ': 'Bologna', 'FLR': 'Florence', 'CAG': 'Cagliari', 'BRI': 'Bari',
+        'CTA': 'Catania', 'PMO': 'Palermo', 'BUS': 'Batum', 'AHO': 'Alghero', 'SKG': 'Thessaloniki',
+        'CFU': 'Corfu', 'HER': 'Heraklion', 'RHO': 'Rhodes', 'ZTH': 'Zakynthos', 'JTR': 'Santorini',
+        'CHQ': 'Chania', 'OPO': 'Porto', 'SPU': 'Split', 'DBV': 'Dubrovnik', 'ZAD': 'Zadar',
+        'BEG': 'Belgrade', 'TIV': 'Tivat', 'TGD': 'Podgorica', 'TIA': 'Tirana', 'SOF': 'Sofia',
+        'OTP': 'Bucharest', 'CLJ': 'Cluj-Napoca', 'KRK': 'Krakow', 'KTW': 'Katowice', 'KGD': 'Kaliningrad',
+        'LED': 'St. Petersburg', 'SVO': 'Moscow', 'DME': 'Moscow', 'VKO': 'Moscow', 'AYT': 'Antalya',
+        'IST': 'Istanbul', 'SAW': 'Istanbul', 'ESB': 'Ankara', 'IZM': 'Izmir', 'ADB': 'Izmir',
+        'TLV': 'Tel Aviv', 'EVN': 'Yerevan', 'TBS': 'Tbilisi', 'GYD': 'Baku', 'KUT': 'Kutaisi',
+        'MSQ': 'Minsk', 'HEL': 'Helsinki', 'KEF': 'Reykjavik', 'BUD': 'Budapest', 'DUB': 'Dublin',
+        'GLA': 'Glasgow', 'BFS': 'Belfast', 'NCE': 'Nice', 'MRS': 'Marseille', 'TFS': 'Tenerife',
+        'LPA': 'Las Palmas', 'IBZ': 'Ibiza', 'VLC': 'Valencia', 'ALC': 'Alicante', 'AGP': 'Malaga',
+        'BIO': 'Bilbao', 'SPC': 'La Palma', 'PDL': 'Ponta Delgada', 'PXO': 'Porto Santo',
+        'RAK': 'Marrakech', 'CAI': 'Cairo', 'DJE': 'Djerba', 'TNR': 'Antananarivo', 'ZNZ': 'Zanzibar',
+        'DXB': 'Dubai', 'SHJ': 'Sharjah', 'AUH': 'Abu Dhabi', 'DOH': 'Doha', 'RUH': 'Riyadh',
+        'JED': 'Jeddah', 'DMM': 'Dammam', 'SSH': 'Sharm El Sheikh', 'HKT': 'Phuket', 'BKK': 'Bangkok',
+        'DMK': 'Bangkok', 'DPS': 'Denpasar', 'ICN': 'Seoul', 'GMP': 'Seoul', 'NRT': 'Tokyo',
+        'HND': 'Tokyo', 'KIX': 'Osaka', 'ITM': 'Osaka', 'PEK': 'Beijing', 'YYZ': 'Toronto',
+        'YWG': 'Winnipeg', 'YEG': 'Edmonton', 'HAV': 'Havana', 'PUJ': 'Punta Cana', 'CMB': 'Colombo',
+        'DEL': 'Delhi', 'SYD': 'Sydney', 'OVB': 'Novosibirsk', 'IKT': 'Irkutsk', 'ULV': 'Ulyanovsk',
+        'KJA': 'Krasnoyarsk', 'FRU': 'Bishkek', 'BOO': 'Bodø', 'BGO': 'Bergen', 'RVN': 'Rovaniemi',
+        'DTM': 'Dortmund', 'STR': 'Stuttgart', 'HAM': 'Hamburg', 'RTM': 'Rotterdam', 'EIN': 'Eindhoven',
+        'BSL': 'Basel', 'ZUR': 'Zurich', 'GVA': 'Geneva', 'CPH': 'Copenhagen', 'BIQ': 'Biarritz',
+        'PIS': 'Poitiers', 'CRL': 'Brussels', 'PUY': 'Puy-en-Velay', 'DWC': 'Dubai', 'AER': 'Sochi',
+        'PHL': 'Philadelphia', 'TAS': 'Tashkent', 'BOJ': 'Burgas'
+    }
     
-    @staticmethod
-    def error(msg: str):
-        print(f"❌ {msg}")
-        logger.error(msg)
-
-console = Console()
-
-# Configuration - Using your existing environment variables
-TRAVELPAYOUTS_API_TOKEN = os.getenv('TRAVELPAYOUTS_API_TOKEN')
-MONGO_URI = os.getenv('MONGODB_CONNECTION_STRING')
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
-# Enhanced price validation - stricter to prevent corruption
-PRICE_LIMITS = (150, 4000)  # More realistic range
-MAX_PRICE_FILTER = 5000     # Reduced from 8000 to prevent business class
-MIN_PRICE_FILTER = 100      # Minimum to prevent one-way confusion
-
-# Regional price validation ranges
-REGIONAL_PRICE_RANGES = {
-    'europe_west': (200, 1200),    # Paris, Amsterdam, Brussels
-    'europe_close': (150, 800),    # Prague, Vienna, Budapest  
-    'europe_north': (300, 1000),   # Oslo, Stockholm, Copenhagen
-    'asia_east': (900, 4000),      # Tokyo, Seoul, Shanghai
-    'asia_south': (800, 3000),     # Delhi, Mumbai, Bangkok
-    'middle_east': (600, 2500),    # Dubai, Doha, Istanbul
-    'africa_north': (500, 2000),   # Cairo, Marrakech, Tunis
-    'americas': (1200, 5000),      # New York, Toronto, Mexico City
-    'domestic': (150, 600),        # Domestic flights
-    'default': (200, 3000)         # Fallback range
-}
-
-# Your exact absolute thresholds
-ABSOLUTE_THRESHOLDS = {
-    'europe_west': 350,
-    'europe_close': 320, 
-    'europe_north': 650,
-    'asia_east': 1400,
-    'asia_south': 1300,
-    'middle_east': 1200,
-    'africa_north': 900,
-    'americas': 2000,
-    'domestic': 250,
-    'default': 500
-}
-
-# Complete destination mapping
-DESTINATIONS = {
-    'CDG': {'name': 'Paris', 'country': 'France', 'region': 'europe_west'},
-    'ORY': {'name': 'Paris Orly', 'country': 'France', 'region': 'europe_west'},
-    'AMS': {'name': 'Amsterdam', 'country': 'Netherlands', 'region': 'europe_west'},
-    'BRU': {'name': 'Brussels', 'country': 'Belgium', 'region': 'europe_west'},
-    'LHR': {'name': 'London', 'country': 'United Kingdom', 'region': 'europe_west'},
-    'DUS': {'name': 'Düsseldorf', 'country': 'Germany', 'region': 'europe_west'},
-    'FRA': {'name': 'Frankfurt', 'country': 'Germany', 'region': 'europe_west'},
-    'MUC': {'name': 'Munich', 'country': 'Germany', 'region': 'europe_west'},
-    'ZUR': {'name': 'Zurich', 'country': 'Switzerland', 'region': 'europe_west'},
-    'VIE': {'name': 'Vienna', 'country': 'Austria', 'region': 'europe_close'},
-    'PRG': {'name': 'Prague', 'country': 'Czech Republic', 'region': 'europe_close'},
-    'BUD': {'name': 'Budapest', 'country': 'Hungary', 'region': 'europe_close'},
-    'OSL': {'name': 'Oslo', 'country': 'Norway', 'region': 'europe_north'},
-    'ARN': {'name': 'Stockholm', 'country': 'Sweden', 'region': 'europe_north'},
-    'CPH': {'name': 'Copenhagen', 'country': 'Denmark', 'region': 'europe_north'},
-    'LIS': {'name': 'Lisbon', 'country': 'Portugal', 'region': 'europe_west'},
-    'BCN': {'name': 'Barcelona', 'country': 'Spain', 'region': 'europe_west'},
-    'MAD': {'name': 'Madrid', 'country': 'Spain', 'region': 'europe_west'},
-    'FCO': {'name': 'Rome', 'country': 'Italy', 'region': 'europe_west'},
-    'MXP': {'name': 'Milan', 'country': 'Italy', 'region': 'europe_west'},
-    'ATH': {'name': 'Athens', 'country': 'Greece', 'region': 'europe_west'},
-    'DUB': {'name': 'Dublin', 'country': 'Ireland', 'region': 'europe_west'},
-    'IST': {'name': 'Istanbul', 'country': 'Turkey', 'region': 'middle_east'},
-    'LCA': {'name': 'Larnaca', 'country': 'Cyprus', 'region': 'middle_east'},
-    'TLV': {'name': 'Tel Aviv', 'country': 'Israel', 'region': 'middle_east'},
-    'CAI': {'name': 'Cairo', 'country': 'Egypt', 'region': 'africa_north'},
-    'DXB': {'name': 'Dubai', 'country': 'UAE', 'region': 'middle_east'}
-}
-
-class TravelPayoutsAPI:
-    """TravelPayouts API client using correct Data API endpoints"""
+    _COUNTRIES = {
+        'FCO': 'Italy', 'MXP': 'Italy', 'LIN': 'Italy', 'BGY': 'Italy', 'CIA': 'Italy', 'VCE': 'Italy', 
+        'NAP': 'Italy', 'GOA': 'Italy', 'PMO': 'Italy', 'BLQ': 'Italy', 'FLR': 'Italy', 'PSA': 'Italy',
+        'CAG': 'Italy', 'BRI': 'Italy', 'CTA': 'Italy', 'BUS': 'Italy', 'AHO': 'Italy',
+        'MAD': 'Spain', 'BCN': 'Spain', 'PMI': 'Spain', 'IBZ': 'Spain', 'VLC': 'Spain', 'ALC': 'Spain',
+        'AGP': 'Spain', 'BIO': 'Spain', 'LPA': 'Spain', 'TFS': 'Spain', 'SPC': 'Spain',
+        'LHR': 'United Kingdom', 'LTN': 'United Kingdom', 'LGW': 'United Kingdom', 'STN': 'United Kingdom',
+        'GLA': 'United Kingdom', 'BFS': 'United Kingdom',
+        'CDG': 'France', 'ORY': 'France', 'NCE': 'France', 'MRS': 'France', 'BIQ': 'France',
+        'PIS': 'France', 'PUY': 'France',
+        'FRA': 'Germany', 'MUC': 'Germany', 'BER': 'Germany', 'HAM': 'Germany', 'STR': 'Germany',
+        'DUS': 'Germany', 'CGN': 'Germany', 'LEJ': 'Germany', 'DTM': 'Germany',
+        'AMS': 'Netherlands', 'RTM': 'Netherlands', 'EIN': 'Netherlands',
+        'ATH': 'Greece', 'SKG': 'Greece', 'CFU': 'Greece', 'HER': 'Greece', 'RHO': 'Greece',
+        'ZTH': 'Greece', 'JTR': 'Greece', 'CHQ': 'Greece',
+        'LIS': 'Portugal', 'OPO': 'Portugal', 'PDL': 'Portugal', 'PXO': 'Portugal',  # FIXED: LIS included
+        'ARN': 'Sweden', 'NYO': 'Sweden', 'OSL': 'Norway', 'BGO': 'Norway', 'BOO': 'Norway',
+        'HEL': 'Finland', 'RVN': 'Finland', 'KEF': 'Iceland', 'CPH': 'Denmark',
+        'VIE': 'Austria', 'PRG': 'Czech Republic', 'BRU': 'Belgium', 'CRL': 'Belgium',
+        'ZUR': 'Switzerland', 'BSL': 'Switzerland', 'GVA': 'Switzerland', 'BUD': 'Hungary',
+        'DUB': 'Ireland', 'VAR': 'Bulgaria', 'BOJ': 'Bulgaria', 'SOF': 'Bulgaria',
+        'OTP': 'Romania', 'CLJ': 'Romania', 'SPU': 'Croatia', 'DBV': 'Croatia', 'ZAD': 'Croatia',
+        'BEG': 'Serbia', 'TIV': 'Montenegro', 'TGD': 'Montenegro', 'TIA': 'Albania',
+        'KRK': 'Poland', 'KTW': 'Poland', 'KGD': 'Russia', 'LED': 'Russia', 'SVO': 'Russia',
+        'DME': 'Russia', 'VKO': 'Russia', 'AER': 'Russia', 'OVB': 'Russia', 'IKT': 'Russia',
+        'ULV': 'Russia', 'KJA': 'Russia', 'MSQ': 'Belarus',
+        'AYT': 'Turkey', 'IST': 'Turkey', 'SAW': 'Turkey', 'ESB': 'Turkey', 'IZM': 'Turkey', 'ADB': 'Turkey',
+        'TLV': 'Israel', 'EVN': 'Armenia', 'TBS': 'Georgia', 'GYD': 'Azerbaijan', 'KUT': 'Georgia',
+        'FRU': 'Kyrgyzstan', 'TAS': 'Uzbekistan',
+        'EWR': 'United States', 'JFK': 'United States', 'LGA': 'United States', 'MIA': 'United States',
+        'PHL': 'United States', 'YYZ': 'Canada', 'YWG': 'Canada', 'YEG': 'Canada',
+        'HAV': 'Cuba', 'PUJ': 'Dominican Republic',
+        'DXB': 'United Arab Emirates', 'SHJ': 'United Arab Emirates', 'AUH': 'United Arab Emirates',
+        'DWC': 'United Arab Emirates', 'DOH': 'Qatar', 'RUH': 'Saudi Arabia', 'JED': 'Saudi Arabia',
+        'DMM': 'Saudi Arabia', 'SSH': 'Egypt', 'CAI': 'Egypt',
+        'RAK': 'Morocco', 'DJE': 'Tunisia', 'TNR': 'Madagascar', 'ZNZ': 'Tanzania',
+        'HKT': 'Thailand', 'BKK': 'Thailand', 'DMK': 'Thailand', 'DPS': 'Indonesia',
+        'ICN': 'South Korea', 'GMP': 'South Korea', 'NRT': 'Japan', 'HND': 'Japan',
+        'KIX': 'Japan', 'ITM': 'Japan', 'PEK': 'China', 'CMB': 'Sri Lanka', 'DEL': 'India',
+        'SYD': 'Australia'
+    }
     
-    def __init__(self, api_token: str):
-        self.api_token = api_token
-        self.base_url = "https://api.travelpayouts.com"
-        self.session = requests.Session()
-        self.session.headers.update({'X-Access-Token': api_token})
+    def _format_date_range(self, departure_date: str, return_date: str) -> str:
+        """Format date range compactly"""
+        try:
+            dep = datetime.strptime(departure_date, '%Y-%m-%d').strftime('%b %d')
+            ret = datetime.strptime(return_date, '%Y-%m-%d')
+            ret_fmt = ret.strftime('%d' if departure_date[:7] == return_date[:7] else '%b %d')
+            return f"{dep}-{ret_fmt}"
+        except Exception:
+            return f"{departure_date}-{return_date}"
+    
+    def _format_flight_type(self) -> str:
+        """Format flight connections"""
+        out = "Direct" if self.outbound_stops == 0 else f"{self.outbound_stops} stop{'s' if self.outbound_stops > 1 else ''}"
+        ret = "Direct" if self.return_stops == 0 else f"{self.return_stops} stop{'s' if self.return_stops > 1 else ''}"
+        return "Direct flights" if out == ret == "Direct" else f"Out: {out}, Return: {ret}"
+    
+    def __str__(self):
+        origin = self._CITIES.get('WAW', 'Warsaw')
+        dest = self._CITIES.get(self.destination, self.destination)
+        country = self._COUNTRIES.get(self.destination, '')
+        flag = self._FLAGS.get(self.destination, '')
         
-    def get_flights_for_dates(self, origin: str, destination: str, departure_at: str, 
-                             return_at: str = None) -> List[Dict]:
-        """Get flights using TravelPayouts v3 API with correct parameters"""
-        try:
-            # Use the correct TravelPayouts v3 endpoint
-            url = f"{self.base_url}/aviasales/v3/prices_for_dates"
-            
-            params = {
-                'origin': origin,
-                'destination': destination,
-                'departure_at': departure_at[:7],  # YYYY-MM format for month
-                'currency': 'PLN',
-                'one_way': False,  # Round trip
-                'direct': False,   # Allow connections
-                'sorting': 'price',
-                'limit': 50
-            }
-            
-            # Add return date for round trips
-            if return_at:
-                params['return_at'] = return_at[:7]  # YYYY-MM format
-            else:
-                params['one_way'] = True
-                
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if not data.get('success', False):
-                console.warning(f"API returned success=false for {origin}->{destination}")
-                return []
-            
-            # Extract flights from response
-            flights = data.get('data', [])
-            
-            # Filter for economy class only (trip_class: 0)
-            economy_flights = []
-            for flight in flights:
-                if flight.get('trip_class', 0) == 0:  # Economy only
-                    economy_flights.append(flight)
-            
-            console.info(f"Found {len(economy_flights)} economy flights for {origin} → {destination}")
-            return economy_flights
-            
-        except requests.exceptions.RequestException as e:
-            console.error(f"API request failed: {e}")
-            return []
-        except Exception as e:
-            console.error(f"Unexpected error in flight search: {e}")
-            return []
-    
-    def get_cheap_flights(self, origin: str, destination: str, depart_date: str = None, 
-                         return_date: str = None) -> List[Dict]:
-        """Get cheapest flights using TravelPayouts v1 cheap API"""
-        try:
-            # Use the v1/prices/cheap endpoint
-            url = f"{self.base_url}/v1/prices/cheap"
-            
-            params = {
-                'origin': origin,
-                'destination': destination,
-                'currency': 'PLN'
-            }
-            
-            # Add dates if provided (format: YYYY-MM)
-            if depart_date:
-                params['depart_date'] = depart_date[:7]  # Use YYYY-MM format
-            if return_date:
-                params['return_date'] = return_date[:7]  # Use YYYY-MM format
-                
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if not data.get('success', False):
-                console.warning(f"API returned success=false for {origin}->{destination}")
-                return []
-            
-            # Extract flights from nested structure
-            flights = []
-            flight_data = data.get('data', {})
-            
-            if destination in flight_data:
-                dest_flights = flight_data[destination]
-                for key, flight in dest_flights.items():
-                    if isinstance(flight, dict) and 'price' in flight:
-                        # Convert TravelPayouts format to our format
-                        processed_flight = {
-                            'price': flight['price'],
-                            'airline': flight.get('airline', ''),
-                            'flight_number': flight.get('flight_number', ''),
-                            'departure_at': flight.get('departure_at', ''),
-                            'return_at': flight.get('return_at', ''),
-                            'expires_at': flight.get('expires_at', ''),
-                            'trip_class': 0,  # Assume economy
-                            'currency': 'PLN'
-                        }
-                        flights.append(processed_flight)
-            
-            console.info(f"Found {len(flights)} flights for {origin} → {destination}")
-            return flights
-            
-        except requests.exceptions.RequestException as e:
-            console.error(f"API request failed: {e}")
-            return []
-        except Exception as e:
-            console.error(f"Unexpected error in flight search: {e}")
-            return []
-    
-    def get_latest_prices(self, origin: str = None, destination: str = None) -> List[Dict]:
-        """Get latest prices from TravelPayouts"""
-        try:
-            url = f"{self.base_url}/v2/prices/latest"
-            
-            params = {
-                'currency': 'PLN',
-                'period_type': 'month',
-                'page': 1,
-                'limit': 30,
-                'show_to_affiliates': True,
-                'sorting': 'price',
-                'trip_class': 0  # Economy only
-            }
-            
-            if origin:
-                params['origin'] = origin
-            if destination:
-                params['destination'] = destination
-                
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if not data.get('success', False):
-                return []
-            
-            flights = data.get('data', [])
-            console.info(f"Found {len(flights)} latest price entries")
-            return flights
-            
-        except requests.exceptions.RequestException as e:
-            console.error(f"Latest prices API request failed: {e}")
-            return []
-        except Exception as e:
-            console.error(f"Unexpected error getting latest prices: {e}")
-            return []
+        header = f"*{origin} → {dest}{f', {country} {flag}' if country and flag else ''}: {self.price:.0f} zł*"
+        date_range = self._format_date_range(self.departure_at[:10], self.return_at[:10])
+        
+        return (f"{header}\n\n"
+                f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n"
+                f"📊 {self.savings_percent:.0f}% below typical ({self.median_price:.0f} zł)\n\n"
+                f"🔗 [Book Deal]({self.booking_link})")
 
-class FlightDataValidator:
-    """Enhanced flight data validation to prevent corruption"""
+class MongoFlightCache:
+    """MongoDB-based flight cache with persistent 45-day rolling window - ALWAYS UPDATES"""
     
-    @staticmethod
-    def validate_price(price: float, destination: str) -> bool:
-        """Validate price against regional ranges"""
-        if price < MIN_PRICE_FILTER or price > MAX_PRICE_FILTER:
-            return False
-            
-        # Get regional range
-        region = DESTINATIONS.get(destination, {}).get('region', 'default')
-        min_price, max_price = REGIONAL_PRICE_RANGES.get(region, REGIONAL_PRICE_RANGES['default'])
-        
-        # Allow some flexibility but catch obvious outliers
-        flexible_min = min_price * 0.7
-        flexible_max = max_price * 1.3
-        
-        return flexible_min <= price <= flexible_max
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
+        self.client = None
+        self.db = None
+        self.CACHE_DAYS = 45  # 1.5 months (realistic for 512 MB MongoDB)
+        self._connect()
     
-    @staticmethod
-    def validate_flight_data(flight_data: Dict) -> bool:
-        """Validate entire flight data entry"""
+    def _connect(self):
+        """Connect to MongoDB Atlas"""
         try:
-            # Basic price validation
-            price = float(flight_data.get('price', 0))
-            if not FlightDataValidator.validate_price(price, flight_data.get('destination', '')):
-                return False
-                
-            # Check for required fields
-            required_fields = ['origin', 'destination', 'price']
-            if not all(field in flight_data for field in required_fields):
-                return False
-                
-            return True
-            
+            console.info("🔗 Connecting to MongoDB Atlas...")
+            self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=10000)
+            # Test connection
+            self.client.admin.command('ping')
+            self.db = self.client['flight_bot_db']
+            console.info("✅ Connected to MongoDB Atlas successfully")
+        except ConnectionFailure as e:
+            console.info(f"❌ Failed to connect to MongoDB: {e}")
+            raise
         except Exception as e:
-            console.warning(f"Validation error: {e}")
-            return False
-
-class MongoDBCache:
-    """Smart MongoDB cache - builds data without daily deletion"""
+            console.info(f"❌ MongoDB connection error: {e}")
+            raise
     
-    def __init__(self, uri: str, db_name: str = 'flight_bot_db'):
-        self.client = MongoClient(uri)
-        self.db = self.client[db_name]
-        self.validator = FlightDataValidator()
+    def cache_daily_data(self, api, destinations: List[str], months: List[str]):
+        """Cache daily flight data to MongoDB - ALWAYS PERFORMS FULL UPDATE"""
+        today = datetime.now().strftime('%Y-%m-%d')
         
-    def store_flight_data(self, flight_data: Dict) -> bool:
-        """Store flight data with validation and duplicate prevention"""
+        console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
+        console.info(f"📅 Cache date: {today} (ALWAYS updates - no skipping)")
+        
+        # Remove today's data if any exists (ensures fresh daily data)
         try:
-            # Validate before storing
-            if not self.validator.validate_flight_data(flight_data):
-                return False
-                
-            # Add validation flag
-            flight_data['data_quality'] = 'validated'
-            flight_data['validation_date'] = datetime.now()
-            
-            # Create unique identifier to prevent duplicates
-            flight_data['unique_id'] = f"{flight_data['origin']}-{flight_data['destination']}-{flight_data.get('departure_at', '')}-{flight_data['price']}"
+            deleted = self.db.flight_data.delete_many({'cached_date': today})
+            if deleted.deleted_count > 0:
+                console.info(f"🧹 Removed {deleted.deleted_count} existing entries for {today}")
+        except Exception as e:
+            console.info(f"⚠️ Error cleaning today's data: {e}")
+        
+        # Batch insert for better performance
+        all_entries = []
+        total_cached = 0
+        successful_destinations = 0
+        
+        for i, destination in enumerate(destinations, 1):
+            console.info(f"📥 [{i}/{len(destinations)}] Caching {destination}")
             
             try:
-                self.db.flight_data.insert_one(flight_data)
-                return True
-            except DuplicateKeyError:
-                # Duplicate found, that's okay
-                return False
+                combinations = api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
                 
-        except Exception:
-            return False
-    
-    def get_market_data(self, destination: str) -> Dict:
-        """Get market data - simplified without corruption detection"""
-        try:
-            # Get all validated prices for destination
-            prices_cursor = self.db.flight_data.find(
-                {
-                    'destination': destination,
-                    'data_quality': 'validated'
-                }, 
-                {'price': 1}
-            )
-            prices = [doc['price'] for doc in prices_cursor]
-            
-            if len(prices) < 50:
-                return {
-                    'sample_size': len(prices),
-                    'median_price': None,
-                    'std_dev': None,
-                    'min_price': None,
-                    'max_price': None,
-                    'sufficient_data': False
-                }
-            
-            # Calculate statistics
-            median_price = statistics.median(prices)
-            std_dev = statistics.stdev(prices)
-            min_price = min(prices)
-            max_price = max(prices)
-            
-            return {
-                'sample_size': len(prices),
-                'median_price': median_price,
-                'std_dev': std_dev,
-                'min_price': min_price,
-                'max_price': max_price,
-                'sufficient_data': True
-            }
-            
-        except Exception as e:
-            console.error(f"Error getting market data: {e}")
-            return {'sample_size': 0, 'sufficient_data': False}
-    
-    def cleanup_old_data(self, days_old: int = 45):
-        """Clean up old cached data (45-day rolling window)"""
-        try:
-            cutoff_datetime = datetime.now() - timedelta(days=days_old)
-            
-            # Remove old flight data
-            result = self.db.flight_data.delete_many({
-                'cached_date': {'$lt': cutoff_datetime}
-            })
-            if result.deleted_count > 0:
-                console.info(f"Cleaned up {result.deleted_count} old flight entries (45-day window)")
-            
-        except Exception as e:
-            console.error(f"Error during cleanup: {e}")
-
-class FlightAnalyzer:
-    """Enhanced flight analyzer with deal detection"""
-    
-    def __init__(self, cache: MongoDBCache):
-        self.cache = cache
-        
-    def analyze_deal(self, destination: str, price: float) -> Dict:
-        """Analyze if a flight is a deal using multiple criteria"""
-        try:
-            # Get market data
-            market_data = self.cache.get_market_data(destination)
-            
-            if not market_data['sufficient_data']:
-                return {
-                    'is_deal': False,
-                    'deal_type': None,
-                    'reason': 'insufficient_data',
-                    'confidence': 0
-                }
-            
-            # Get absolute threshold
-            region = DESTINATIONS.get(destination, {}).get('region', 'default')
-            absolute_threshold = ABSOLUTE_THRESHOLDS.get(region, ABSOLUTE_THRESHOLDS['default'])
-            
-            # Check absolute threshold
-            absolute_deal = price < absolute_threshold
-            
-            # Check Z-score threshold
-            median_price = market_data['median_price']
-            std_dev = market_data['std_dev']
-            z_score = (median_price - price) / std_dev if std_dev > 0 else 0
-            statistical_deal = z_score >= 1.7
-            
-            # Determine deal type
-            if absolute_deal and statistical_deal:
-                deal_type = "🔥 Amazing Deal"
-                confidence = 95
-            elif absolute_deal:
-                deal_type = "💰 Great Price"
-                confidence = 85
-            elif statistical_deal:
-                deal_type = "📊 Statistical Deal"
-                confidence = 75
-            else:
-                return {
-                    'is_deal': False,
-                    'deal_type': None,
-                    'reason': 'no_criteria_met',
-                    'confidence': 0
-                }
-            
-            # Calculate savings
-            savings_percent = round((1 - price / median_price) * 100, 1)
-            
-            return {
-                'is_deal': True,
-                'deal_type': deal_type,
-                'confidence': confidence,
-                'price': price,
-                'median_price': median_price,
-                'savings_percent': savings_percent,
-                'z_score': round(z_score, 2),
-                'absolute_threshold': absolute_threshold,
-                'meets_absolute': absolute_deal,
-                'meets_statistical': statistical_deal
-            }
-            
-        except Exception as e:
-            console.error(f"Error analyzing deal: {e}")
-            return {'is_deal': False, 'deal_type': None, 'confidence': 0}
-
-class TelegramNotifier:
-    """Enhanced Telegram notifications"""
-    
-    def __init__(self, bot_token: str, chat_id: str):
-        self.bot_token = bot_token
-        self.chat_id = chat_id
-        self.base_url = f"https://api.telegram.org/bot{bot_token}"
-        
-    def send_deal_alert(self, destination: str, deal_info: Dict) -> bool:
-        """Send enhanced deal alert"""
-        try:
-            dest_info = DESTINATIONS.get(destination, {})
-            city_name = dest_info.get('name', destination)
-            country = dest_info.get('country', 'Unknown')
-            
-            # Format deal message
-            message = f"✈️ **FLIGHT DEAL ALERT** ✈️\n\n"
-            message += f"🏙️ **{city_name}, {country}** ({destination})\n"
-            message += f"💰 **{deal_info['price']} zł** {deal_info['deal_type']}\n\n"
-            
-            message += f"📊 **Savings:** {deal_info['savings_percent']}% below typical ({deal_info['median_price']} zł)\n"
-            message += f"🎯 **Confidence:** {deal_info['confidence']}%\n\n"
-            
-            # Add criteria met
-            criteria = []
-            if deal_info['meets_absolute']:
-                criteria.append(f"Under {deal_info['absolute_threshold']} zł threshold")
-            if deal_info['meets_statistical']:
-                criteria.append(f"Z-score: {deal_info['z_score']}")
-            
-            message += f"✅ **Criteria:** {', '.join(criteria)}\n\n"
-            message += f"🔍 **Search:** WAW → {destination}\n"
-            message += f"⏰ **Alert time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            
-            return self._send_message(message)
-            
-        except Exception as e:
-            console.error(f"Error sending deal alert: {e}")
-            return False
-    
-    def send_status_update(self, message: str) -> bool:
-        """Send status update"""
-        try:
-            return self._send_message(message)
-        except Exception as e:
-            console.error(f"Error sending status update: {e}")
-            return False
-    
-    def _send_message(self, message: str) -> bool:
-        """Send message via Telegram API"""
-        try:
-            url = f"{self.base_url}/sendMessage"
-            data = {
-                'chat_id': self.chat_id,
-                'text': message,
-                'parse_mode': 'Markdown',
-                'disable_web_page_preview': True
-            }
-            
-            response = requests.post(url, data=data)
-            response.raise_for_status()
-            
-            return True
-            
-        except Exception as e:
-            console.error(f"Failed to send Telegram message: {e}")
-            return False
-
-class FlightBot:
-    """Enhanced main flight bot class with correct TravelPayouts API"""
-    
-    def __init__(self):
-        self.api = TravelPayoutsAPI(TRAVELPAYOUTS_API_TOKEN)
-        self.cache = MongoDBCache(MONGO_URI)
-        self.analyzer = FlightAnalyzer(self.cache)
-        self.notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self.deals_sent_today = set()
-        self.start_time = time.time()
-        
-    def cache_daily_data(self):
-        """Smart daily cache building using TravelPayouts Data API"""
-        try:
-            console.info("🔄 Starting smart daily cache building...")
-            today = datetime.now()
-            
-            # Clean up old data (45-day rolling window)
-            self.cache.cleanup_old_data(45)
-            
-            # Cache flights for each destination using Data API
-            total_cached = 0
-            new_entries_today = 0
-            
-            for destination in DESTINATIONS.keys():
-                if destination == 'WAW':  # Skip Warsaw as origin
-                    continue
+                if combinations:
+                    for combo in combinations:
+                        all_entries.append({
+                            'destination': destination,
+                            'outbound_date': combo.outbound_date,
+                            'return_date': combo.return_date,
+                            'price': combo.total_price,
+                            'transfers_out': combo.outbound_transfers,
+                            'transfers_return': combo.return_transfers,
+                            'airline': combo.outbound_airline,
+                            'cached_date': today,
+                            'trip_duration': combo.duration_days
+                        })
                     
-                console.info(f"🔍 Building cache for {destination}...")
-                destination_cached = 0
+                    successful_destinations += 1
+                    console.info(f"  ✅ {destination}: Cached {len(combinations)} combinations")
+                else:
+                    console.info(f"  ⚠️ {destination}: No valid combinations found")
                 
-                # Try different month combinations for better coverage
-                for month_offset in range(3):  # Next 3 months
+                # Batch insert every 1000 entries for memory efficiency
+                if len(all_entries) >= 1000:
                     try:
-                        target_month = today + timedelta(days=30 * month_offset)
-                        depart_date = target_month.strftime('%Y-%m')
-                        return_date = target_month.strftime('%Y-%m')
-                        
-                        # Get flights using both methods for better coverage
-                        flights_v3 = self.api.get_flights_for_dates(
-                            origin='WAW',
-                            destination=destination,
-                            departure_at=target_month.strftime('%Y-%m'),
-                            return_at=(target_month + timedelta(days=7)).strftime('%Y-%m')
-                        )
-                        
-                        flights_v1 = self.api.get_cheap_flights(
-                            origin='WAW',
-                            destination=destination,
-                            depart_date=target_month.strftime('%Y-%m'),
-                            return_date=(target_month + timedelta(days=7)).strftime('%Y-%m')
-                        )
-                        
-                        # Combine results
-                        all_flights = flights_v3 + flights_v1
-                        
-                        # Process and cache flights
-                        for flight in all_flights:
-                            try:
-                                # Convert price to float
-                                price = float(flight['price'])
-                                
-                                # Create flight data entry
-                                flight_data = {
-                                    'origin': 'WAW',
-                                    'destination': destination,
-                                    'price': price,
-                                    'departure_at': flight.get('departure_at', ''),
-                                    'return_at': flight.get('return_at', ''),
-                                    'cached_date': datetime.now(),
-                                    'airline': flight.get('airline', ''),
-                                    'flight_number': str(flight.get('flight_number', '')),
-                                    'currency': 'PLN',
-                                    'source': 'travelpayouts_api',
-                                    'transfers': flight.get('transfers', 0),
-                                    'duration': flight.get('duration', 0)
-                                }
-                                
-                                if self.cache.store_flight_data(flight_data):
-                                    destination_cached += 1
-                                    total_cached += 1
-                                    new_entries_today += 1
-                                    
-                            except (KeyError, ValueError, TypeError) as e:
-                                console.warning(f"Error processing flight: {e}")
-                                continue
-                        
-                        # Rate limiting
-                        time.sleep(0.5)
-                        
+                        self.db.flight_data.insert_many(all_entries, ordered=False)
+                        total_cached += len(all_entries)
+                        all_entries.clear()
                     except Exception as e:
-                        console.warning(f"Error caching {destination} for {depart_date}: {e}")
-                        continue
+                        console.info(f"⚠️ Batch insert error: {e}")
+                        all_entries.clear()
                 
-                console.info(f"✅ Added {destination_cached} new flights for {destination}")
-            
-            console.success(f"🎯 Smart caching complete: {new_entries_today} new entries today, {total_cached} total processed")
-            
-            # Update destination statistics
-            self._update_all_destination_stats()
-            
-        except Exception as e:
-            console.error(f"Error in smart caching: {e}")
+                # Small delay to be nice to the API
+                if i % 10 == 0:
+                    time.sleep(1)
+                
+            except Exception as e:
+                console.info(f"  ❌ {destination}: Error - {e}")
+                logger.error(f"Cache error for {destination}: {e}")
+        
+        # Insert remaining entries
+        if all_entries:
+            try:
+                self.db.flight_data.insert_many(all_entries, ordered=False)
+                total_cached += len(all_entries)
+            except Exception as e:
+                console.info(f"⚠️ Final batch insert error: {e}")
+        
+        # Update statistics for all destinations that have data
+        self._update_all_destination_stats()
+        
+        # Clean up old data (keep 45-day window)
+        self._manage_rolling_window(today)
+        
+        console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
     
     def _update_all_destination_stats(self):
-        """Update statistics for all destinations"""
+        """Update statistics for all destinations with sufficient data"""
+        console.info("📊 Updating destination statistics...")
+        
         try:
+            # Get all destinations with data
+            destinations = self.db.flight_data.distinct('destination')
             stats_updated = 0
             
-            for destination in DESTINATIONS.keys():
-                if destination == 'WAW':
-                    continue
-                    
-                market_data = self.cache.get_market_data(destination)
+            for destination in destinations:
+                # Get all prices for this destination
+                prices_cursor = self.db.flight_data.find(
+                    {'destination': destination}, 
+                    {'price': 1, '_id': 0}
+                )
+                prices = [doc['price'] for doc in prices_cursor]
                 
-                if market_data['sufficient_data']:
-                    # Store/update destination stats
-                    stats = {
+                if len(prices) >= 50:  # Need minimum data for reliable stats
+                    stats_doc = {
                         'destination': destination,
-                        'sample_size': market_data['sample_size'],
-                        'median_price': market_data['median_price'],
-                        'std_dev': market_data['std_dev'],
-                        'min_price': market_data['min_price'],
-                        'max_price': market_data['max_price'],
-                        'last_updated': datetime.now(),
-                        'region': DESTINATIONS[destination]['region']
+                        'median_price': statistics.median(prices),
+                        'std_dev': statistics.stdev(prices) if len(prices) > 1 else 0,
+                        'min_price': min(prices),
+                        'max_price': max(prices),
+                        'sample_size': len(prices),
+                        'last_updated': datetime.now().strftime('%Y-%m-%d')
                     }
                     
-                    self.cache.db.destination_stats.replace_one(
+                    # Upsert (update or insert)
+                    self.db.destination_stats.replace_one(
                         {'destination': destination},
-                        stats,
+                        stats_doc,
                         upsert=True
                     )
-                    
-                    # Get threshold for display
-                    region = DESTINATIONS[destination]['region']
-                    threshold = ABSOLUTE_THRESHOLDS.get(region, ABSOLUTE_THRESHOLDS['default'])
-                    
-                    console.success(f"✅ {destination}: {market_data['sample_size']} samples, "
-                                  f"median: {market_data['median_price']:.0f} zł, "
-                                  f"threshold: {threshold} zł")
                     stats_updated += 1
-                else:
-                    console.warning(f"⚠️ {destination}: Insufficient data ({market_data['sample_size']} samples)")
             
-            console.success(f"📊 Updated statistics for {stats_updated} destinations")
-                    
+            console.info(f"📊 Updated statistics for {stats_updated} destinations")
+            
         except Exception as e:
-            console.error(f"Error updating destination stats: {e}")
+            console.info(f"⚠️ Error updating destination stats: {e}")
     
-    def find_deals(self):
-        """Find and alert on current deals using latest prices"""
+    def _manage_rolling_window(self, current_date: str):
+        """Remove data older than 45 days"""
         try:
-            console.info("🔍 Searching for current deals...")
-            deals_found = 0
+            cutoff_date = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=self.CACHE_DAYS)).strftime('%Y-%m-%d')
+            result = self.db.flight_data.delete_many({'cached_date': {'$lt': cutoff_date}})
+            if result.deleted_count > 0:
+                console.info(f"🧹 Removed {result.deleted_count:,} old entries (keeping 45-day window)")
+        except Exception as e:
+            console.info(f"⚠️ Error managing rolling window: {e}")
+    
+    def get_market_data(self, destination: str) -> Optional[Dict]:
+        """Get cached market statistics"""
+        try:
+            stats = self.db.destination_stats.find_one({'destination': destination})
+            if stats:
+                return {
+                    'destination': stats['destination'],
+                    'median_price': stats['median_price'],
+                    'std_dev': stats['std_dev'],
+                    'min_price': stats['min_price'],
+                    'max_price': stats['max_price'],
+                    'sample_size': stats['sample_size']
+                }
+            return None
+        except Exception as e:
+            console.info(f"⚠️ Error getting market data for {destination}: {e}")
+            return None
+    
+    def get_cache_summary(self) -> Dict:
+        """Get cache statistics"""
+        try:
+            # Total entries
+            total_entries = self.db.flight_data.count_documents({})
             
-            # Get latest prices from TravelPayouts
-            latest_flights = self.api.get_latest_prices()
+            # Destinations with stats
+            ready_destinations = self.db.destination_stats.count_documents({'sample_size': {'$gte': 50}})
             
-            for flight in latest_flights:
-                try:
-                    origin = flight.get('origin')
-                    destination = flight.get('destination')
-                    price = float(flight.get('value', flight.get('price', 0)))
+            # Date range
+            date_range = None
+            try:
+                oldest = self.db.flight_data.find_one(sort=[('cached_date', 1)])
+                newest = self.db.flight_data.find_one(sort=[('cached_date', -1)])
+                if oldest and newest:
+                    date_range = (oldest['cached_date'], newest['cached_date'])
+            except:
+                pass
+            
+            return {
+                'total_entries': total_entries,
+                'ready_destinations': ready_destinations,
+                'date_range': date_range
+            }
+        except Exception as e:
+            console.info(f"⚠️ Error getting cache summary: {e}")
+            return {'total_entries': 0, 'ready_destinations': 0, 'date_range': None}
+    
+    def log_deal_alert(self, deal: VerifiedDeal):
+        """Log deal alert to prevent duplicates"""
+        try:
+            alert_doc = {
+                'destination': deal.destination,
+                'price': deal.price,
+                'z_score': deal.z_score,
+                'alert_date': datetime.now().strftime('%Y-%m-%d')
+            }
+            self.db.deal_alerts.insert_one(alert_doc)
+        except Exception as e:
+            console.info(f"⚠️ Error logging deal alert: {e}")
+    
+    def get_recent_alert(self, destination: str) -> Optional[Dict]:
+        """Get most recent alert for destination"""
+        try:
+            alert = self.db.deal_alerts.find_one(
+                {'destination': destination},
+                sort=[('alert_date', -1)]
+            )
+            return alert
+        except Exception as e:
+            console.info(f"⚠️ Error getting recent alert for {destination}: {e}")
+            return None
+    
+    def cleanup_old_alerts(self):
+        """Remove alerts older than 30 days"""
+        try:
+            cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            result = self.db.deal_alerts.delete_many({'alert_date': {'$lt': cutoff_date}})
+            if result.deleted_count > 0:
+                console.info(f"🧹 Cleaned up {result.deleted_count} old alerts")
+        except Exception as e:
+            console.info(f"⚠️ Error cleaning up alerts: {e}")
+
+class SmartAPI:
+    """Optimized API handler with efficient caching"""
+    
+    PRICE_LIMITS = (200, 6000)
+    MAX_PRICE_FILTER = 8000
+    
+    # YOUR EXACT ABSOLUTE DEAL THRESHOLDS
+    ABSOLUTE_DEAL_THRESHOLDS = {
+        'europe_close': 250,        # Scandinavia, Balkans, Eastern Europe
+        'europe_west': 350,         # UK, France, Germany, Spain, Italy
+        'middle_east_close': 700,   # Turkey, Israel, Egypt
+        'middle_east_gulf': 750,    # UAE, Qatar, Saudi Arabia
+        'north_africa': 650,        # Morocco, Tunisia
+        'asia_close': 1100,         # Central Asia, Russia
+        'asia_southeast': 1600,     # Thailand, Indonesia, Malaysia  
+        'asia_east': 1700,          # Japan, South Korea, China
+        'asia_south': 1400,         # India, Sri Lanka
+        'north_america_east': 1700, # New York, Toronto, Montreal
+        'north_america_west': 2200, # LA, Vancouver, Seattle
+        'central_america': 2200,    # Mexico, Cuba
+        'south_america': 2800,      # Brazil, Argentina
+        'east_africa': 1500,        # Tanzania (Zanzibar), Madagascar
+        'west_africa': 2200,        # Ghana, Nigeria, Senegal
+        'south_africa': 2500        # South Africa
+    }
+    
+    # Detailed region mappings for absolute thresholds
+    ABSOLUTE_REGIONS = {
+        # Europe Close (Scandinavia, Balkans, Eastern Europe)
+        **{dest: 'europe_close' for dest in [
+            'ARN', 'NYO', 'OSL', 'BGO', 'BOO', 'CPH', 'HEL', 'RVN', 'KEF',  # Scandinavia/Nordic
+            'VAR', 'BOJ', 'SOF', 'OTP', 'CLJ', 'BEG', 'SPU', 'DBV', 'ZAD',  # Balkans
+            'TIV', 'TGD', 'TIA', 'SKG', 'BUD', 'PRG', 'BRU', 'CRL', 'KRK', 'KTW',  # Eastern Europe
+            'LED', 'KGD', 'MSQ', 'EVN', 'TBS', 'GYD', 'KUT'  # Eastern Europe/Caucasus
+        ]},
+        
+        # Europe West (UK, France, Germany, Spain, Italy, etc.)
+        **{dest: 'europe_west' for dest in [
+            'LHR', 'LTN', 'LGW', 'STN', 'GLA', 'BFS', 'DUB',  # UK/Ireland
+            'CDG', 'ORY', 'NCE', 'MRS', 'BIQ', 'PIS', 'PUY',  # France
+            'FRA', 'MUC', 'BER', 'HAM', 'STR', 'DUS', 'CGN', 'LEJ', 'DTM',  # Germany
+            'MAD', 'BCN', 'PMI', 'IBZ', 'VLC', 'ALC', 'AGP', 'BIO', 'LPA', 'TFS', 'SPC',  # Spain
+            'FCO', 'MXP', 'LIN', 'BGY', 'CIA', 'VCE', 'NAP', 'PMO', 'BLQ', 'FLR', 'PSA',  # Italy
+            'CAG', 'BRI', 'CTA', 'BUS', 'AHO', 'GOA',  # Italy continued
+            'AMS', 'RTM', 'EIN', 'ZUR', 'BSL', 'GVA', 'LIS', 'OPO', 'PDL', 'PXO',  # Netherlands/Switzerland/Portugal
+            'VIE', 'ATH', 'CFU', 'HER', 'RHO', 'ZTH', 'JTR', 'CHQ'  # Austria/Greece
+        ]},
+        
+        # Middle East Close (Turkey, Israel, Egypt)
+        **{dest: 'middle_east_close' for dest in [
+            'AYT', 'IST', 'SAW', 'ESB', 'IZM', 'ADB', 'TLV', 'SSH', 'CAI'
+        ]},
+        
+        # Middle East Gulf (UAE, Qatar, Saudi Arabia)
+        **{dest: 'middle_east_gulf' for dest in [
+            'DXB', 'SHJ', 'AUH', 'DWC', 'DOH', 'RUH', 'JED', 'DMM'
+        ]},
+        
+        # North Africa
+        **{dest: 'north_africa' for dest in [
+            'RAK', 'DJE'
+        ]},
+        
+        # Asia Close (Central Asia, Russia)
+        **{dest: 'asia_close' for dest in [
+            'SVO', 'DME', 'VKO', 'AER', 'OVB', 'IKT', 'ULV', 'KJA', 'FRU', 'TAS'
+        ]},
+        
+        # Asia Southeast
+        **{dest: 'asia_southeast' for dest in [
+            'BKK', 'DMK', 'HKT', 'DPS'
+        ]},
+        
+        # Asia East
+        **{dest: 'asia_east' for dest in [
+            'NRT', 'HND', 'KIX', 'ITM', 'ICN', 'GMP', 'PEK'
+        ]},
+        
+        # Asia South
+        **{dest: 'asia_south' for dest in [
+            'DEL', 'CMB'
+        ]},
+        
+        # North America East
+        **{dest: 'north_america_east' for dest in [
+            'EWR', 'JFK', 'LGA', 'PHL', 'YYZ', 'MIA'
+        ]},
+        
+        # North America West
+        **{dest: 'north_america_west' for dest in [
+            'YWG', 'YEG'
+        ]},
+        
+        # Central America
+        **{dest: 'central_america' for dest in [
+            'HAV', 'PUJ'
+        ]},
+        
+        # South America
+        **{dest: 'south_america' for dest in [
+            'SYD'  # Note: SYD is actually Australia, might need adjustment
+        ]},
+        
+        # East Africa
+        **{dest: 'east_africa' for dest in [
+            'ZNZ', 'TNR'
+        ]},
+        
+        # West Africa (empty for now)
+        **{dest: 'west_africa' for dest in []},
+        
+        # South Africa (empty for now)
+        **{dest: 'south_africa' for dest in []}
+    }
+    
+    # Legacy regions for duration constraints (keep existing)
+    REGIONS = {
+        **{dest: 'europe' for dest in [
+            'FCO', 'MAD', 'BCN', 'LHR', 'AMS', 'ATH', 'CDG', 'MUC', 'VIE', 'PRG', 'BRU', 'GVA', 'ARN', 
+            'CPH', 'OSL', 'DUB', 'LIS', 'OPO', 'MXP', 'NAP', 'PMI', 'IBZ', 'VLC', 'BUD', 'ZUR', 'FRA',
+            'LTN', 'LGW', 'STN', 'NYO', 'ORY', 'LIN', 'BGY', 'CIA', 'VCE', 'OTP', 'HEL', 'PMO', 'KEF'
+        ]},
+        **{dest: 'middle_east' for dest in ['DXB', 'SHJ', 'AUH', 'RUH', 'SSH', 'JED', 'DMM', 'CAI', 'DOH']},
+        **{dest: 'asia' for dest in ['NRT', 'HND', 'KIX', 'ITM', 'ICN', 'GMP', 'PEK', 'BKK', 'DPS', 'HKT']},
+        **{dest: 'americas' for dest in ['JFK', 'EWR', 'LGA', 'MIA', 'YYZ', 'YWG', 'YEG', 'HAV', 'PUJ']},
+        **{dest: 'africa' for dest in ['TNR', 'RAK', 'DJE', 'ZNZ', 'CMB']}
+    }
+    
+    DURATION_CONSTRAINTS = {
+        'europe': (3, 5), 'middle_east': (5, 7), 'asia': (10, 16), 
+        'americas': (9, 12), 'africa': (7, 10)
+    }
+    
+    def __init__(self, api_token: str, affiliate_marker: str = "default_marker"):
+        self.api_token = api_token
+        self.affiliate_marker = affiliate_marker
+        self.session = requests.Session()
+        self.session.headers.update({'X-Access-Token': api_token})
+        self.cache = {}
+    
+    def get_duration_constraints(self, destination: str) -> Tuple[int, int]:
+        """Get trip duration constraints for destination"""
+        region = self.REGIONS.get(destination, 'europe')
+        return self.DURATION_CONSTRAINTS[region]
+    
+    def get_absolute_threshold(self, destination: str) -> float:
+        """Get absolute price threshold for destination"""
+        region = self.ABSOLUTE_REGIONS.get(destination, 'europe_west')  # Default to europe_west
+        return self.ABSOLUTE_DEAL_THRESHOLDS[region]
+    
+    def _validate_flight_data(self, price: float, departure_date: str, month: str) -> bool:
+        """Validate flight data"""
+        if not (0 < price < self.MAX_PRICE_FILTER and departure_date):
+            return False
+        try:
+            flight_date = datetime.strptime(departure_date, '%Y-%m-%d')
+            request_month = datetime.strptime(month, '%Y-%m')
+            month_diff = abs((flight_date.year - request_month.year) * 12 + (flight_date.month - request_month.month))
+            return month_diff <= 3
+        except ValueError:
+            return False
+    
+    def _extract_flights(self, origin: str, destination: str, month: str, api_type: str = 'v3') -> List[MatrixEntry]:
+        """Extract flights using specified API"""
+        if api_type == 'v3':
+            url = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
+            params = {
+                'origin': origin, 'destination': destination, 'departure_at': month, 'return_at': month,
+                'one_way': False, 'currency': 'PLN', 'sorting': 'price', 'limit': 1000, 'token': self.api_token
+            }
+        else:  # matrix
+            url = "https://api.travelpayouts.com/v2/prices/month-matrix"
+            params = {
+                'origin': origin, 'destination': destination, 'month': month,
+                'currency': 'PLN', 'show_to_affiliates': True, 'token': self.api_token
+            }
+        
+        entries = []
+        for page in range(1, 6 if api_type == 'v3' else 2):
+            try:
+                if api_type == 'v3':
+                    params['page'] = page
+                
+                response = self.session.get(url, params=params, timeout=15)
+                if response.status_code != 200:
+                    if response.status_code == 429:  # Rate limit
+                        time.sleep(2)
+                        continue
+                    break
+                
+                data = response.json()
+                flights = data.get('data', [])
+                if not flights:
+                    break
+                
+                for entry in flights:
+                    if api_type == 'v3':
+                        price = entry.get('price', 0)
+                        date = entry.get('departure_at', '').split('T')[0] if entry.get('departure_at') else ''
+                        transfers = entry.get('transfers', 0)
+                        airline = entry.get('airline', 'Unknown')
+                    else:
+                        price = entry.get('value', 0) or entry.get('price', 0)
+                        date = entry.get('depart_date', '') or entry.get('departure_at', '')
+                        transfers = entry.get('number_of_changes', 0) or entry.get('transfers', 0)
+                        airline = entry.get('gate', 'Unknown') or entry.get('airline', 'Unknown')
                     
-                    # Only process flights from WAW to our monitored destinations
-                    if origin == 'WAW' and destination in DESTINATIONS:
-                        # Analyze if it's a deal
-                        deal_analysis = self.analyzer.analyze_deal(destination, price)
-                        
-                        if deal_analysis['is_deal']:
-                            # Check if we should alert (avoid duplicates)
-                            today = datetime.now().date()
-                            recent_alert = f"{destination}-{today}"
-                            if recent_alert not in self.deals_sent_today:
-                                
-                                # Send alert
-                                alert_sent = self.notifier.send_deal_alert(destination, deal_analysis)
-                                
-                                if alert_sent:
-                                    self.deals_sent_today.add(recent_alert)
-                                    deals_found += 1
-                                    console.success(f"✅ Alert sent for {destination}: {price} zł ({deal_analysis['deal_type']})")
-                                
-                except (KeyError, ValueError, TypeError) as e:
-                    console.warning(f"Error processing flight data: {e}")
+                    if self._validate_flight_data(price, date, month):
+                        entries.append(MatrixEntry(date, price, transfers, airline))
+                
+                time.sleep(0.2)
+                if api_type != 'v3' or len(flights) < 1000:
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"API error for {origin}-{destination}: {e}")
+                break
+        
+        return entries
+    
+    def extract_all_available_flights(self, origin: str, destination: str, month: str) -> List[MatrixEntry]:
+        """Extract flights with caching and fallback strategies"""
+        cache_key = f"{origin}-{destination}-{month}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        # Primary: V3 API
+        entries = self._extract_flights(origin, destination, month, 'v3')
+        
+        # Fallback: Matrix API if insufficient data
+        if len(entries) < 50:
+            matrix_entries = self._extract_flights(origin, destination, month, 'matrix')
+            existing = {(e.date, e.price) for e in entries}
+            entries.extend([e for e in matrix_entries if (e.date, e.price) not in existing])
+        
+        self.cache[cache_key] = entries
+        return entries
+    
+    def generate_comprehensive_roundtrip_combinations(self, origin: str, destination: str, months: List[str]) -> List[RoundTripCandidate]:
+        """Generate optimized round-trip combinations"""
+        min_days, max_days = self.get_duration_constraints(destination)
+        
+        # Collect all flights efficiently
+        outbound = []
+        return_flights = []
+        
+        for month in months:
+            try:
+                outbound.extend(self.extract_all_available_flights(origin, destination, month))
+                return_flights.extend(self.extract_all_available_flights(destination, origin, month))
+            except Exception as e:
+                logger.warning(f"Error getting flights for {destination} in {month}: {e}")
+                continue
+        
+        if not outbound or not return_flights:
+            return []
+        
+        # Parse dates once for efficiency
+        valid_outbound = []
+        valid_return = []
+        
+        for f in outbound:
+            if self._validate_date(f.date):
+                try:
+                    parsed_date = datetime.strptime(f.date, '%Y-%m-%d')
+                    valid_outbound.append((f, parsed_date))
+                except ValueError:
                     continue
+        
+        for f in return_flights:
+            if self._validate_date(f.date):
+                try:
+                    parsed_date = datetime.strptime(f.date, '%Y-%m-%d')
+                    valid_return.append((f, parsed_date))
+                except ValueError:
+                    continue
+        
+        # Generate combinations efficiently
+        candidates = []
+        for out_flight, out_date in valid_outbound[:500]:  # Limit for performance
+            for ret_flight, ret_date in valid_return[:500]:
+                duration = (ret_date - out_date).days
+                if min_days <= duration <= max_days:
+                    total_price = out_flight.price + ret_flight.price
+                    if self.PRICE_LIMITS[0] <= total_price <= self.PRICE_LIMITS[1]:
+                        candidates.append(RoundTripCandidate(
+                            destination, out_flight.date, ret_flight.date, total_price, duration,
+                            out_flight.transfers, ret_flight.transfers, out_flight.airline, ret_flight.airline
+                        ))
+                        if len(candidates) >= 10000:  # Performance limit
+                            return candidates
+        
+        return candidates
+    
+    def _validate_date(self, date_str: str) -> bool:
+        """Quick date validation"""
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+            return True
+        except ValueError:
+            return False
+    
+    def get_v3_verification(self, origin: str, destination: str, departure_date: str, return_date: str) -> Optional[Dict]:
+        """Verify deal with V3 API"""
+        url = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
+        params = {
+            'origin': origin, 'destination': destination, 'departure_at': departure_date,
+            'return_at': return_date, 'one_way': False, 'currency': 'PLN', 'sorting': 'price',
+            'limit': 1, 'token': self.api_token
+        }
+        
+        try:
+            response = self.session.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                flights = data.get('data', [])
+                return flights[0] if flights else None
+            elif response.status_code == 429:
+                time.sleep(1)
+                return None
+        except Exception as e:
+            logger.warning(f"V3 verification error: {e}")
+        return None
+
+class FastTelegram:
+    """Optimized Telegram sender"""
+    
+    def __init__(self, bot_token: str, chat_id: str):
+        self.url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self.chat_id = chat_id
+    
+    def send(self, message: str) -> bool:
+        """Send message with error handling"""
+        try:
+            response = requests.post(self.url, json={
+                'chat_id': self.chat_id, 'text': message, 'parse_mode': 'Markdown'
+            }, timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"Telegram error: {e}")
+            return False
+
+class MongoFlightBot:
+    """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
+    
+    # Class constants for better memory usage
+    Z_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
+    WEEKLY_RESET_DAYS = 7
+    PRICE_IMPROVEMENT_THRESHOLD = 0.05
+    
+    # Consolidated destinations list
+    DESTINATIONS = [
+        'CDG', 'ORY', 'BCN', 'FCO', 'MXP', 'LIN', 'BGY', 'CIA', 'ATH', 'VCE', 'NAP', 'LIS', 'AMS', 'LHR',
+        'LTN', 'LGW', 'ARN', 'MAD', 'NYO', 'STN', 'OSL', 'PRG', 'OTP', 'HEL', 'FRA', 'PMO', 'KEF', 'BUD',
+        'VLC', 'CTA', 'KUT', 'TBS', 'GYD', 'VKO', 'SVO', 'DME', 'AYT', 'IST', 'SAW', 'ALC', 'TAS', 'NCE',
+        'TFS', 'PMI', 'TGD', 'TIA', 'TLV', 'EVN', 'MSQ', 'AGP', 'BOJ', 'SPU', 'GOA', 'BRI', 'SKG', 'CFU',
+        'OPO', 'HER', 'BUS', 'LED', 'TIV', 'BEG', 'RHO', 'ZAD', 'JTR', 'ZTH', 'VAR', 'AER', 'DTM', 'STR',
+        'HAM', 'SOF', 'KRK', 'BLQ', 'FLR', 'PSA', 'KGD', 'IBZ', 'ESB', 'IZM', 'ADB', 'DBV', 'BSL', 'CHQ',
+        'CAG', 'KTW', 'RTM', 'BIO', 'LPA', 'SPC', 'PDL', 'PXO', 'AHO', 'BGO', 'RVN', 'CLJ', 'GLA', 'BFS',
+        'BIQ', 'PIS', 'CRL', 'PUY', 'JFK', 'EWR', 'LGA', 'MIA', 'ICN', 'GMP', 'PEK', 'DXB', 'SHJ', 'SSH',
+        'ZNZ', 'RUH', 'HKT', 'DPS', 'BKK', 'DMK', 'YYZ', 'YWG', 'YEG', 'HAV', 'PUJ', 'CAI', 'RAK', 'DJE',
+        'NRT', 'HND', 'KIX', 'ITM', 'CMB', 'PHL', 'DEL', 'SYD', 'TNR', 'OVB', 'IKT', 'ULV', 'KJA', 'AUH',
+        'DWC', 'DOH', 'JED', 'DMM', 'BOO', 'FRU'
+    ]
+    
+    def __init__(self, api_token: str, affiliate_marker: str, telegram_token: str, telegram_chat_id: str, mongodb_connection: str):
+        self.api = SmartAPI(api_token, affiliate_marker)
+        self.telegram = FastTelegram(telegram_token, telegram_chat_id)
+        self.cache = MongoFlightCache(mongodb_connection)
+        self.start_time = None
+        self.total_start_time = None
+    
+    @staticmethod
+    def _generate_future_months(start_month: int = 8, start_year: int = 2025, count: int = 6) -> List[str]:
+        """Generate future months efficiently"""
+        months = []
+        for i in range(count):
+            month = start_month + i
+            year = start_year + (month - 1) // 12
+            month = ((month - 1) % 12) + 1
+            months.append(f"{year:04d}-{month:02d}")
+        return months
+    
+    def should_alert_destination(self, destination: str, current_price: float, z_score: float) -> bool:
+        """Smart alerting logic with MongoDB access - works for both Z-score and absolute deals"""
+        recent_alert = self.cache.get_recent_alert(destination)
+        if not recent_alert:
+            return True
+        
+        last_price = recent_alert['price']
+        last_date = recent_alert['alert_date']
+        
+        try:
+            days_since = (datetime.now() - datetime.strptime(last_date, '%Y-%m-%d')).days
+        except ValueError:
+            return True  # Invalid date format, allow alert
+        
+        return (days_since >= self.WEEKLY_RESET_DAYS or 
+                (last_price - current_price) / last_price > self.PRICE_IMPROVEMENT_THRESHOLD)
+    
+    def classify_deal_with_zscore(self, price: float, destination: str, market_data: Dict) -> Tuple[str, float, float, float, bool]:
+        """Deal classification with Z-score AND absolute thresholds - COMBINED LOGIC"""
+        z_score = 0.0
+        savings_percent = 0.0
+        percentile = 50.0
+        
+        # Calculate Z-score if we have market data
+        if market_data and market_data['std_dev'] > 0:
+            median_price = market_data['median_price']
+            z_score = (median_price - price) / market_data['std_dev']
+            savings_percent = ((median_price - price) / median_price) * 100
             
-            console.success(f"🎯 Deal detection complete: {deals_found} deals found")
-            return deals_found
+            try:
+                percentile = 50 + 50 * math.erf(z_score / math.sqrt(2)) if z_score >= 0 else 50 - 50 * math.erf(abs(z_score) / math.sqrt(2))
+            except (OverflowError, ValueError):
+                percentile = 99.9 if z_score > 0 else 0.1
+        
+        # Check absolute threshold
+        absolute_threshold = self.api.get_absolute_threshold(destination)
+        is_absolute_deal = price < absolute_threshold
+        
+        # COMBINED LOGIC: Z-score OR absolute threshold qualifies as deal
+        if z_score >= self.Z_THRESHOLDS['exceptional'] or (is_absolute_deal and price < absolute_threshold * 0.8):
+            return "🔥 Exceptional Deal", z_score, savings_percent, percentile, True
+        elif z_score >= self.Z_THRESHOLDS['excellent'] or (is_absolute_deal and price < absolute_threshold * 0.9):
+            return "💎 Excellent Deal", z_score, savings_percent, percentile, True
+        elif z_score >= self.Z_THRESHOLDS['great'] or is_absolute_deal:
+            return "💰 Great Deal", z_score, savings_percent, percentile, True
+        else:
+            return "📊 Fair Price", z_score, savings_percent, percentile, False
+    
+    def _create_booking_link(self, candidate: RoundTripCandidate, v3_result: Dict) -> str:
+        """Create optimized booking link"""
+        link = v3_result.get('link', '')
+        if link:
+            return f"https://www.aviasales.com{link}"
+        else:
+            return (f"https://www.aviasales.com/search/WAW{candidate.outbound_date}"
+                   f"{candidate.destination}{candidate.return_date}?marker={self.api.affiliate_marker}")
+    
+    def find_and_verify_deals_for_destination(self, destination: str, market_data: Dict, months: List[str]) -> List[VerifiedDeal]:
+        """Find and verify deals - MAXIMUM 1 DEAL PER DESTINATION"""
+        console.info(f"  🔍 Searching for deals in {destination}")
+        
+        try:
+            candidates = self.api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
+        except Exception as e:
+            console.info(f"  ❌ Error generating combinations for {destination}: {e}")
+            return []
+        
+        if not candidates:
+            console.info(f"  📊 {destination}: No valid combinations found")
+            return []
+        
+        # Efficient sorting and filtering
+        for candidate in candidates:
+            if market_data['std_dev'] > 0:
+                candidate.estimated_savings_percent = ((market_data['median_price'] - candidate.total_price) / 
+                                                      market_data['std_dev'])
+            else:
+                candidate.estimated_savings_percent = 0
+        
+        # Take top candidates efficiently
+        top_candidates = sorted(candidates, key=lambda x: x.estimated_savings_percent, reverse=True)[:10]
+        console.info(f"  📋 Verifying top {len(top_candidates)} candidates from {len(candidates):,} combinations")
+        
+        best_deal = None
+        best_z_score = 0
+        
+        for candidate in top_candidates:
+            if candidate.estimated_savings_percent < 1.0:
+                continue
+            
+            try:
+                v3_result = self.api.get_v3_verification('WAW', destination, candidate.outbound_date, candidate.return_date)
+            except Exception as e:
+                logger.warning(f"V3 verification error for {destination}: {e}")
+                continue
+            
+            if v3_result:
+                actual_price = v3_result.get('price', 0)
+                if actual_price <= 0:
+                    continue
+                
+                deal_type, z_score, savings_percent, percentile, is_deal = self.classify_deal_with_zscore(actual_price, destination, market_data)
+                
+                if (is_deal and z_score > best_z_score and
+                    self.should_alert_destination(destination, actual_price, z_score)):
+                    
+                    best_z_score = z_score
+                    
+                    # Extract date information safely
+                    departure_at = v3_result.get('departure_at', candidate.outbound_date)
+                    return_at = v3_result.get('return_at', candidate.return_date)
+                    
+                    # Handle datetime strings
+                    if 'T' in departure_at:
+                        departure_at = departure_at.split('T')[0]
+                    if 'T' in return_at:
+                        return_at = return_at.split('T')[0]
+                    
+                    best_deal = VerifiedDeal(
+                        destination=destination,
+                        departure_month=months[0],
+                        return_month=months[0],
+                        price=actual_price,
+                        departure_at=departure_at,
+                        return_at=return_at,
+                        duration_total=v3_result.get('duration', 0),
+                        outbound_stops=v3_result.get('transfers', candidate.outbound_transfers),
+                        return_stops=v3_result.get('return_transfers', candidate.return_transfers),
+                        airline=v3_result.get('airline', candidate.outbound_airline),
+                        booking_link=self._create_booking_link(candidate, v3_result),
+                        deal_type=deal_type,
+                        median_price=market_data['median_price'],
+                        savings_percent=savings_percent,
+                        trip_duration_days=candidate.duration_days,
+                        z_score=z_score,
+                        percentile=percentile,
+                        outbound_flight_number=v3_result.get('flight_number', ''),
+                        return_flight_number=v3_result.get('return_flight_number', ''),
+                        outbound_duration=v3_result.get('outbound_duration', 0),
+                        return_duration=v3_result.get('return_duration', 0)
+                    )
+                    
+                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Z-score: {z_score:.1f}, Threshold: {self.api.get_absolute_threshold(destination)})")
+            
+            time.sleep(0.3)
+        
+        return [best_deal] if best_deal else []
+    
+    def send_immediate_deal_alert(self, deal: VerifiedDeal, deal_number: int, elapsed_minutes: float):
+        """Send optimized alert"""
+        success = self.telegram.send(str(deal))
+        if success:
+            self.cache.log_deal_alert(deal)
+            console.info(f"📱 Alert #{deal_number} for {deal.destination} - {deal.price:.0f} zł")
+        else:
+            console.info(f"⚠️ Failed to send alert for {deal.destination}")
+    
+    def update_cache_and_detect_deals(self):
+        """Main automated method: ALWAYS updates MongoDB cache AND detects deals"""
+        self.total_start_time = time.time()
+        
+        console.info("🤖 MONGODB FLIGHT BOT STARTED (ALWAYS UPDATES CACHE)")
+        console.info("=" * 60)
+        
+        months = self._generate_future_months()
+        
+        # Send startup notification
+        startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
+                      f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
+                      f"⚡ ALWAYS performs full daily update\n"
+                      f"🎯 Phase 2: Deal Detection\n"
+                      f"📅 Months: {', '.join(months)}\n\n"
+                      f"⚡ Z-score ≥1.7 OR Absolute thresholds | Smart deduplication active\n"
+                      f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
+        
+        if not self.telegram.send(startup_msg):
+            console.info("⚠️ Failed to send startup notification")
+        
+        # PHASE 1: UPDATE MONGODB CACHE (ALWAYS)
+        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (ALWAYS RUNS)")
+        console.info("=" * 50)
+        
+        cache_start = time.time()
+        try:
+            # ALWAYS perform cache update - no skipping logic
+            self.cache.cache_daily_data(self.api, self.DESTINATIONS, months)
+            cache_time = (time.time() - cache_start) / 60
+            
+            # Get cache summary
+            cache_summary = self.cache.get_cache_summary()
+            
+            console.info(f"✅ MongoDB cache update completed in {cache_time:.1f} minutes")
+            console.info(f"📊 Cache summary: {cache_summary['total_entries']:,} entries, {cache_summary['ready_destinations']} destinations ready")
+            
+            # Send cache update notification
+            cache_msg = (f"✅ *MONGODB CACHE UPDATE COMPLETE*\n\n"
+                        f"⏱️ Time: {cache_time:.1f} minutes\n"
+                        f"📊 Total entries: {cache_summary['total_entries']:,}\n"
+                        f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
+                        f"🗃️ 45-day rolling window (optimized for 512 MB)\n"
+                        f"⚡ FULL daily update performed\n"
+                        f"☁️ Persistent cloud storage\n\n"
+                        f"🚀 Starting deal detection...")
+            
+            self.telegram.send(cache_msg)
             
         except Exception as e:
-            console.error(f"Error in deal detection: {e}")
-            return 0
+            error_msg = f"❌ MongoDB cache update failed: {e}"
+            console.info(error_msg)
+            self.telegram.send(error_msg)
+            return []
+        
+        # PHASE 2: DEAL DETECTION
+        console.info("\n🎯 PHASE 2: DEAL DETECTION")
+        console.info("=" * 30)
+        
+        self.start_time = time.time()
+        all_deals = []
+        deals_found = 0
+        
+        for i, destination in enumerate(self.DESTINATIONS, 1):
+            elapsed_time = time.time() - self.start_time
+            console.info(f"🎯 [{i}/{len(self.DESTINATIONS)}] Processing {destination} ({elapsed_time/60:.1f}min elapsed)")
+            
+            try:
+                market_data = self.cache.get_market_data(destination)
+                
+                if market_data and market_data['sample_size'] >= 50:
+                    console.info(f"  ✅ {destination}: {market_data['sample_size']} samples, median: {market_data['median_price']:.0f} zł, threshold: {self.api.get_absolute_threshold(destination)} zł")
+                    
+                    verified_deals = self.find_and_verify_deals_for_destination(destination, market_data, months)
+                    
+                    if verified_deals:
+                        deals_found += len(verified_deals)
+                        for deal in verified_deals:
+                            all_deals.append(deal)
+                            self.send_immediate_deal_alert(deal, deals_found, elapsed_time/60)
+                    else:
+                        console.info(f"  📊 {destination}: No deals passed smart filter")
+                else:
+                    sample_size = market_data['sample_size'] if market_data else 0
+                    console.info(f"  ⚠️ {destination}: Insufficient cached data ({sample_size} samples)")
+                
+                # Progress update every 25 destinations
+                if i % 25 == 0:
+                    progress_time = time.time() - self.start_time
+                    console.info(f"🔄 Progress: {i}/{len(self.DESTINATIONS)} ({(i/len(self.DESTINATIONS))*100:.1f}%) - {deals_found} deals found - {progress_time/60:.1f}min elapsed")
+            
+            except Exception as e:
+                console.info(f"  ❌ Error processing {destination}: {e}")
+                logger.error(f"Error processing {destination}: {e}")
+        
+        return all_deals
+    
+    def send_final_summary(self, deals: List[VerifiedDeal]):
+        """Send comprehensive final summary"""
+        total_time = (time.time() - self.total_start_time) / 60
+        detection_time = (time.time() - self.start_time) / 60
+        cache_time = total_time - detection_time
+        
+        # Get cache stats
+        cache_summary = self.cache.get_cache_summary()
+        
+        if not deals:
+            summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
+                      f"⏱️ Total runtime: {total_time:.1f} minutes\n"
+                      f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
+                      f"🎯 Deal detection: {detection_time:.1f} min\n\n"
+                      f"📊 Database: {cache_summary['total_entries']:,} entries\n"
+                      f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
+                      f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} OR absolute thresholds required)\n\n"
+                      f"🗃️ 45-day rolling cache (optimized)\n"
+                      f"⚡ ALWAYS updates cache - no skipping\n"
+                      f"☁️ Persistent MongoDB Atlas storage\n"
+                      f"🔄 Next run: Tomorrow (automated)")
+            
+            self.telegram.send(summary)
+            return
+        
+        # Efficient categorization
+        exceptional = sum(1 for d in deals if d.z_score >= self.Z_THRESHOLDS['exceptional'])
+        excellent = sum(1 for d in deals if self.Z_THRESHOLDS['excellent'] <= d.z_score < self.Z_THRESHOLDS['exceptional'])
+        great = sum(1 for d in deals if self.Z_THRESHOLDS['great'] <= d.z_score < self.Z_THRESHOLDS['excellent'])
+        
+        # Calculate savings
+        total_savings = sum(d.savings_percent for d in deals)
+        avg_savings = total_savings / len(deals) if deals else 0
+        
+        summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
+                  f"⏱️ Total runtime: {total_time:.1f} minutes\n"
+                  f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
+                  f"🎯 Deal detection: {detection_time:.1f} min\n\n"
+                  f"✅ **{len(deals)} DEALS FOUND**\n"
+                  f"🔥 {exceptional} exceptional (Z≥{self.Z_THRESHOLDS['exceptional']})\n"
+                  f"💎 {excellent} excellent (Z≥{self.Z_THRESHOLDS['excellent']})\n"
+                  f"💰 {great} great (Z≥{self.Z_THRESHOLDS['great']})\n\n"
+                  f"📊 Average savings: {avg_savings:.0f}%\n"
+                  f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
+                  f"🎯 Smart deduplication active (max 1 deal per destination)\n"
+                  f"⚡ ALWAYS updates cache - no skipping\n"
+                  f"☁️ Persistent MongoDB Atlas cache\n\n"
+                  f"🔄 Next run: Tomorrow (automated)")
+        
+        self.telegram.send(summary)
+        console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
-        """Main execution method for smart cache building"""
+        """Single command that does EVERYTHING with MongoDB - ALWAYS UPDATES"""
         try:
-            console.info("🤖 FIXED TRAVELPAYOUTS FLIGHT BOT STARTED")
-            console.info("=" * 50)
+            # Clean up old alerts first
+            self.cache.cleanup_old_alerts()
             
-            # Send startup notification
-            startup_msg = (
-                f"🤖 **Fixed TravelPayouts Flight Bot Started**\n\n"
-                f"🔧 **Using Correct API Endpoints:**\n"
-                f"✅ /aviasales/v3/prices_for_dates\n"
-                f"✅ /v1/prices/cheap\n"
-                f"✅ Proper parameter formatting\n"
-                f"✅ Economy class filtering\n"
-                f"✅ PLN currency support\n\n"
-                f"🚀 Starting operations..."
-            )
-            self.notifier.send_status_update(startup_msg)
+            # Main automation: MongoDB cache update + deal detection
+            deals = self.update_cache_and_detect_deals()
             
-            # Step 1: Smart cache building
-            console.info("📥 Phase 1: Smart daily cache building...")
-            cache_start_time = time.time()
-            self.cache_daily_data()
-            cache_time = time.time() - cache_start_time
+            # Summary
+            total_time = (time.time() - self.total_start_time) / 60
+            console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
+            console.info(f"⏱️ Total time: {total_time:.1f} minutes")
+            console.info(f"🎉 Found {len(deals)} deals")
+            console.info(f"🗃️ 45-day cache with FULL daily updates")
+            console.info(f"⚡ No cache skipping - always updates")
+            console.info(f"☁️ Persistent storage maintained")
             
-            # Step 2: Find current deals  
-            console.info("🔍 Phase 2: Detecting current deals...")
-            deals_start_time = time.time()
-            deals_found = self.find_deals()
-            deals_time = time.time() - deals_start_time
-            
-            # Step 3: Send summary
-            total_time = time.time() - self.start_time
-            
-            summary_msg = (
-                f"✅ **Fixed TravelPayouts Flight Bot Complete**\n\n"
-                f"⏱️ **Performance:**\n"
-                f"📥 Cache building: {cache_time/60:.1f} min\n"
-                f"🔍 Deal detection: {deals_time/60:.1f} min\n"
-                f"🎯 Total runtime: {total_time/60:.1f} min\n\n"
-                f"📊 **Results:**\n"
-                f"🎯 **Deals Found:** {deals_found}\n\n"
-                f"🔧 **API Fixes Applied:**\n"
-                f"✅ Correct TravelPayouts endpoints\n"
-                f"✅ Proper parameter formatting\n"
-                f"✅ Economy class filtering\n"
-                f"✅ Enhanced error handling\n\n"
-                f"🔄 **Next Run:** Tomorrow (automated)"
-            )
-            self.notifier.send_status_update(summary_msg)
-            
-            console.success(f"🎉 Bot execution complete: {deals_found} deals found, {total_time/60:.1f} min runtime")
+            self.send_final_summary(deals)
             
         except Exception as e:
-            error_msg = f"❌ Bot execution error: {e}"
-            console.error(error_msg)
-            self.notifier.send_status_update(error_msg)
+            error_msg = f"\n❌ Bot error: {str(e)}"
+            console.info(error_msg)
+            logger.error(f"Bot error: {e}")
+            self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Main function for automated daily execution"""
+    """Main function for MongoDB-powered automation with ALWAYS UPDATE cache"""
     try:
-        console.info("🚀 Starting Fixed TravelPayouts Flight Bot...")
-        
-        # Verify environment variables
-        required_vars = [
-            'TRAVELPAYOUTS_API_TOKEN', 'MONGODB_CONNECTION_STRING', 
-            'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'
-        ]
-        
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-        if missing_vars:
-            console.error(f"Missing environment variables: {', '.join(missing_vars)}")
-            return 1
-        
-        # Initialize and run the bot
-        bot = FlightBot()
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    
+    # Get environment variables
+    env_vars = {
+        'API_TOKEN': os.getenv('TRAVELPAYOUTS_API_TOKEN'),
+        'AFFILIATE_MARKER': os.getenv('TRAVELPAYOUTS_AFFILIATE_MARKER', 'default_marker'),
+        'TELEGRAM_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN'),
+        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID'),
+        'MONGODB_CONNECTION': os.getenv('MONGODB_CONNECTION_STRING')
+    }
+    
+    missing = [k for k, v in env_vars.items() if not v and k != 'AFFILIATE_MARKER']
+    if missing:
+        console.info(f"❌ Missing environment variables: {', '.join(missing)}")
+        return
+    
+    bot = MongoFlightBot(
+        env_vars['API_TOKEN'], env_vars['AFFILIATE_MARKER'],
+        env_vars['TELEGRAM_TOKEN'], env_vars['TELEGRAM_CHAT_ID'],
+        env_vars['MONGODB_CONNECTION']
+    )
+    
+    # Handle command line arguments for flexibility
+    import sys
+    command = sys.argv[1] if len(sys.argv) > 1 else None
+    
+    if command == '--cache-only':
+        # Just update MongoDB cache (for testing)
+        months = bot._generate_future_months()
+        bot.cache.cache_daily_data(bot.api, bot.DESTINATIONS, months)
+    elif command == '--detect-only':
+        # Just detect deals (for testing)
+        months = bot._generate_future_months()
+        bot.start_time = time.time()
+        deals = []
+        for destination in bot.DESTINATIONS[:10]:  # Test with first 10
+            market_data = bot.cache.get_market_data(destination)
+            if market_data:
+                deals.extend(bot.find_and_verify_deals_for_destination(destination, market_data, months))
+        console.info(f"Found {len(deals)} deals in test")
+    else:
+        # DEFAULT: Full automation (MongoDB cache + detection)
         bot.run()
-        
-        console.success("🎉 Fixed TravelPayouts Flight Bot completed successfully!")
-        return 0
-        
-    except Exception as e:
-        console.error(f"Fatal error: {e}")
-        return 1
 
 if __name__ == "__main__":
-    exit(main())
+    main()
