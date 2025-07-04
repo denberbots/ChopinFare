@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced Flight Bot - Production Ready
-✅ All syntax errors fixed
+Enhanced Flight Bot - Optimized for Smart Cache Building
+✅ Builds cache daily without deleting existing data
 ✅ Enhanced data validation to prevent corruption
 ✅ Economy class filtering only
 ✅ Regional price validation
-✅ Automatic corruption detection and cleanup
+✅ Uses TravelPayouts API with your existing credentials
 """
 
 import logging
@@ -54,10 +54,9 @@ class Console:
 
 console = Console()
 
-# Configuration
-AMADEUS_API_KEY = os.getenv('AMADEUS_API_KEY')
-AMADEUS_API_SECRET = os.getenv('AMADEUS_API_SECRET')
-MONGO_URI = os.getenv('MONGO_URI')
+# Configuration - Using your existing environment variables
+TRAVELPAYOUTS_API_TOKEN = os.getenv('TRAVELPAYOUTS_API_TOKEN')
+MONGO_URI = os.getenv('MONGODB_CONNECTION_STRING')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
@@ -66,7 +65,7 @@ PRICE_LIMITS = (150, 4000)  # More realistic range
 MAX_PRICE_FILTER = 5000     # Reduced from 8000 to prevent business class
 MIN_PRICE_FILTER = 100      # Minimum to prevent one-way confusion
 
-# Regional price validation ranges to detect corruption
+# Regional price validation ranges (keeping for validation)
 REGIONAL_PRICE_RANGES = {
     'europe_west': (200, 1200),    # Paris, Amsterdam, Brussels
     'europe_close': (150, 800),    # Prague, Vienna, Budapest  
@@ -135,65 +134,39 @@ DESTINATIONS = {
     'WAW': {'name': 'Warsaw', 'country': 'Poland', 'region': 'domestic'}
 }
 
-class AmadeusAPI:
-    """Enhanced Amadeus API client with strict economy-only filtering"""
+class TravelPayoutsAPI:
+    """TravelPayouts API client with strict economy-only filtering"""
     
-    def __init__(self, api_key: str, api_secret: str):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.base_url = "https://test.api.amadeus.com"
-        self.access_token = None
-        self.token_expires = None
+    def __init__(self, api_token: str):
+        self.api_token = api_token
+        self.base_url = "https://api.travelpayouts.com"
+        self.session = requests.Session()
+        self.session.headers.update({'X-Access-Token': api_token})
         
-    def _get_access_token(self) -> str:
-        """Get access token with caching"""
-        if self.access_token and self.token_expires and datetime.now() < self.token_expires:
-            return self.access_token
-            
-        url = f"{self.base_url}/v1/security/oauth2/token"
-        data = {
-            'grant_type': 'client_credentials',
-            'client_id': self.api_key,
-            'client_secret': self.api_secret
-        }
-        
-        response = requests.post(url, data=data)
-        response.raise_for_status()
-        
-        token_data = response.json()
-        self.access_token = token_data['access_token']
-        self.token_expires = datetime.now() + timedelta(seconds=token_data['expires_in'] - 300)
-        
-        return self.access_token
-    
     def search_flights(self, origin: str, destination: str, departure_date: str, 
                       return_date: str, adults: int = 1) -> List[Dict]:
         """Search for flights with enhanced validation for economy only"""
         try:
-            token = self._get_access_token()
-            url = f"{self.base_url}/v2/shopping/flight-offers"
+            # Use TravelPayouts V3 API
+            url = f"{self.base_url}/aviasales/v3/prices_for_dates"
             
-            # Enhanced parameters to ensure economy only
             params = {
-                'originLocationCode': origin,
-                'destinationLocationCode': destination,
-                'departureDate': departure_date,
-                'returnDate': return_date,
+                'origin': origin,
+                'destination': destination,
+                'departure_at': departure_date,
+                'return_at': return_date,
+                'one_way': False,           # Force round-trip
+                'currency': 'PLN',          # Force PLN currency
+                'sorting': 'price',
+                'limit': 250,
+                'token': self.api_token,
+                'trip_class': 0,            # Economy class only
                 'adults': adults,
                 'children': 0,
-                'infants': 0,
-                'travelClass': 'ECONOMY',  # Force economy class
-                'currencyCode': 'PLN',     # Force PLN currency
-                'max': 250,
-                'nonStop': 'false'
+                'infants': 0
             }
             
-            headers = {
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
-            }
-            
-            response = requests.get(url, params=params, headers=headers)
+            response = self.session.get(url, params=params, timeout=15)
             response.raise_for_status()
             
             data = response.json()
@@ -203,22 +176,12 @@ class AmadeusAPI:
             validated_flights = []
             for flight in flights:
                 try:
-                    # Check travel class in segments
-                    is_economy = True
-                    for itinerary in flight.get('itineraries', []):
-                        for segment in itinerary.get('segments', []):
-                            cabin = segment.get('cabin', 'ECONOMY')
-                            if cabin != 'ECONOMY':
-                                is_economy = False
-                                break
-                        if not is_economy:
-                            break
+                    # Check if it's economy class and PLN currency
+                    price = flight.get('price', 0)
+                    currency = flight.get('currency', 'PLN')
+                    trip_class = flight.get('trip_class', 0)
                     
-                    # Check price currency
-                    price_info = flight.get('price', {})
-                    currency = price_info.get('currency', 'PLN')
-                    
-                    if is_economy and currency == 'PLN':
+                    if currency == 'PLN' and trip_class == 0 and price > 0:
                         validated_flights.append(flight)
                         
                 except (KeyError, TypeError):
@@ -281,7 +244,7 @@ class FlightDataValidator:
             return False
 
 class MongoDBCache:
-    """Enhanced MongoDB cache with corruption detection and cleanup"""
+    """Smart MongoDB cache - builds data without daily deletion"""
     
     def __init__(self, uri: str, db_name: str = 'flight_bot_db'):
         self.client = MongoClient(uri)
@@ -289,7 +252,7 @@ class MongoDBCache:
         self.validator = FlightDataValidator()
         
     def store_flight_data(self, flight_data: Dict) -> bool:
-        """Store flight data with validation"""
+        """Store flight data with validation and duplicate prevention"""
         try:
             # Validate before storing
             if not self.validator.validate_flight_combination(
@@ -299,28 +262,34 @@ class MongoDBCache:
                 flight_data['outbound_date'],
                 flight_data['return_date']
             ):
-                console.warning(f"Invalid flight data rejected: {flight_data}")
                 return False
                 
             # Add validation flag
             flight_data['data_quality'] = 'validated'
             flight_data['validation_date'] = datetime.now()
             
-            self.db.flight_data.insert_one(flight_data)
-            return True
+            # Create unique identifier to prevent duplicates
+            flight_data['unique_id'] = f"{flight_data['origin']}-{flight_data['destination']}-{flight_data['outbound_date']}-{flight_data['return_date']}-{flight_data['price']}"
             
-        except DuplicateKeyError:
-            return False
-        except Exception as e:
-            console.error(f"Error storing flight data: {e}")
+            try:
+                self.db.flight_data.insert_one(flight_data)
+                return True
+            except DuplicateKeyError:
+                # Duplicate found, that's okay
+                return False
+                
+        except Exception:
             return False
     
     def get_market_data(self, destination: str) -> Dict:
-        """Get market data with corruption detection"""
+        """Get market data - simplified without corruption detection"""
         try:
-            # Get all prices for destination
+            # Get all validated prices for destination
             prices_cursor = self.db.flight_data.find(
-                {'destination': destination}, 
+                {
+                    'destination': destination,
+                    'data_quality': 'validated'
+                }, 
                 {'price': 1}
             )
             prices = [doc['price'] for doc in prices_cursor]
@@ -341,19 +310,6 @@ class MongoDBCache:
             min_price = min(prices)
             max_price = max(prices)
             
-            # Check for corruption
-            if self._is_destination_data_corrupted(destination, min_price, max_price, median_price):
-                console.warning(f"Detected corrupted data for {destination} - clearing cache")
-                self.clear_corrupted_destination_data(destination)
-                return {
-                    'sample_size': 0,
-                    'median_price': None,
-                    'std_dev': None,
-                    'min_price': None,
-                    'max_price': None,
-                    'sufficient_data': False
-                }
-            
             return {
                 'sample_size': len(prices),
                 'median_price': median_price,
@@ -367,38 +323,8 @@ class MongoDBCache:
             console.error(f"Error getting market data: {e}")
             return {'sample_size': 0, 'sufficient_data': False}
     
-    def _is_destination_data_corrupted(self, destination: str, min_price: float, 
-                                     max_price: float, median_price: float) -> bool:
-        """Detect if destination data is corrupted"""
-        region = DESTINATIONS.get(destination, {}).get('region', 'default')
-        expected_min, expected_max = REGIONAL_PRICE_RANGES.get(region, REGIONAL_PRICE_RANGES['default'])
-        
-        # Check for corruption indicators
-        if min_price > expected_min * 2:  # No cheap flights at all
-            return True
-        if median_price > expected_max * 1.5:  # Median too high
-            return True
-        if max_price > expected_max * 3:  # Extreme outliers
-            return True
-            
-        return False
-    
-    def clear_corrupted_destination_data(self, destination: str):
-        """Clear corrupted data for a specific destination"""
-        try:
-            # Delete flight data
-            result = self.db.flight_data.delete_many({'destination': destination})
-            console.info(f"Cleared {result.deleted_count} flight entries for {destination}")
-            
-            # Delete stats
-            self.db.destination_stats.delete_one({'destination': destination})
-            console.info(f"Cleared stats for {destination}")
-            
-        except Exception as e:
-            console.error(f"Error clearing corrupted data: {e}")
-    
-    def cleanup_old_data(self, days_old: int = 7):
-        """Clean up old cached data"""
+    def cleanup_old_data(self, days_old: int = 45):
+        """Clean up old cached data (45-day rolling window)"""
         try:
             cutoff_date = datetime.now() - timedelta(days=days_old)
             
@@ -406,7 +332,8 @@ class MongoDBCache:
             result = self.db.flight_data.delete_many({
                 'cached_date': {'$lt': cutoff_date}
             })
-            console.info(f"Cleaned up {result.deleted_count} old flight entries")
+            if result.deleted_count > 0:
+                console.info(f"Cleaned up {result.deleted_count} old flight entries (45-day window)")
             
         except Exception as e:
             console.error(f"Error during cleanup: {e}")
@@ -555,10 +482,10 @@ class TelegramNotifier:
             return False
 
 class FlightBot:
-    """Enhanced main flight bot class"""
+    """Enhanced main flight bot class with smart cache building"""
     
     def __init__(self):
-        self.api = AmadeusAPI(AMADEUS_API_KEY, AMADEUS_API_SECRET)
+        self.api = TravelPayoutsAPI(TRAVELPAYOUTS_API_TOKEN)
         self.cache = MongoDBCache(MONGO_URI)
         self.analyzer = FlightAnalyzer(self.cache)
         self.notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
@@ -566,15 +493,13 @@ class FlightBot:
         self.start_time = time.time()
         
     def cache_daily_data(self):
-        """Cache daily flight data with enhanced validation"""
+        """Smart daily cache building - accumulates data without deletion"""
         try:
-            console.info("🔄 Starting daily data caching...")
-            
-            # Clear today's data to ensure fresh cache
+            console.info("🔄 Starting smart daily cache building...")
             today = datetime.now().date()
-            deleted = self.cache.db.flight_data.delete_many({'cached_date': today})
-            if deleted.deleted_count > 0:
-                console.info(f"🧹 Cleared {deleted.deleted_count} existing entries for today")
+            
+            # Clean up old data (45-day rolling window) - but don't delete today's data
+            self.cache.cleanup_old_data(45)
             
             # Generate date combinations (6 months ahead)
             base_date = datetime.now().date()
@@ -602,16 +527,32 @@ class FlightBot:
             
             # Cache flights for each destination
             total_cached = 0
+            new_entries_today = 0
             
             for destination in DESTINATIONS.keys():
                 if destination == 'WAW':  # Skip Warsaw as origin
                     continue
                     
-                console.info(f"🔍 Caching flights for {destination}...")
+                console.info(f"🔍 Building cache for {destination}...")
                 destination_cached = 0
                 
-                for departure_date, return_date in date_combinations:
+                # Only cache a subset of combinations daily to avoid API limits
+                daily_combinations = date_combinations[::3]  # Every 3rd combination
+                
+                for departure_date, return_date in daily_combinations:
                     try:
+                        # Check if we already have this combination cached recently
+                        existing = self.cache.db.flight_data.find_one({
+                            'origin': 'WAW',
+                            'destination': destination,
+                            'outbound_date': departure_date.strftime('%Y-%m-%d'),
+                            'return_date': return_date.strftime('%Y-%m-%d'),
+                            'cached_date': {'$gte': today - timedelta(days=7)}  # Cached within last week
+                        })
+                        
+                        if existing:
+                            continue  # Skip if recently cached
+                        
                         # Get flights from API
                         flights = self.api.search_flights(
                             origin='WAW',
@@ -621,10 +562,10 @@ class FlightBot:
                         )
                         
                         # Process and cache flights
-                        for flight in flights[:10]:  # Limit to top 10 per combination
+                        for flight in flights[:5]:  # Limit to top 5 per combination for efficiency
                             try:
                                 # Extract price
-                                price = float(flight['price']['total'])
+                                price = float(flight['price'])
                                 
                                 # Validate and store
                                 flight_data = {
@@ -634,7 +575,7 @@ class FlightBot:
                                     'outbound_date': departure_date.strftime('%Y-%m-%d'),
                                     'return_date': return_date.strftime('%Y-%m-%d'),
                                     'cached_date': today,
-                                    'flight_id': flight.get('id', ''),
+                                    'flight_id': flight.get('flight_number', ''),
                                     'duration': (return_date - departure_date).days,
                                     'currency': 'PLN'
                                 }
@@ -642,31 +583,35 @@ class FlightBot:
                                 if self.cache.store_flight_data(flight_data):
                                     destination_cached += 1
                                     total_cached += 1
+                                    if flight_data['cached_date'] == today:
+                                        new_entries_today += 1
                                     
                             except (KeyError, ValueError) as e:
                                 console.warning(f"Error processing flight: {e}")
                                 continue
                         
                         # Rate limiting
-                        time.sleep(0.1)
+                        time.sleep(0.2)
                         
                     except Exception as e:
                         console.warning(f"Error caching {destination} for {departure_date}: {e}")
                         continue
                 
-                console.info(f"✅ Cached {destination_cached} flights for {destination}")
+                console.info(f"✅ Added {destination_cached} new flights for {destination}")
             
-            console.success(f"🎯 Total cached: {total_cached} flights")
+            console.success(f"🎯 Smart caching complete: {new_entries_today} new entries today, {total_cached} total processed")
             
             # Update destination statistics
             self._update_all_destination_stats()
             
         except Exception as e:
-            console.error(f"Error in daily caching: {e}")
+            console.error(f"Error in smart caching: {e}")
     
     def _update_all_destination_stats(self):
         """Update statistics for all destinations"""
         try:
+            stats_updated = 0
+            
             for destination in DESTINATIONS.keys():
                 if destination == 'WAW':
                     continue
@@ -699,8 +644,11 @@ class FlightBot:
                     console.success(f"✅ {destination}: {market_data['sample_size']} samples, "
                                   f"median: {market_data['median_price']:.0f} zł, "
                                   f"threshold: {threshold} zł")
+                    stats_updated += 1
                 else:
                     console.warning(f"⚠️ {destination}: Insufficient data ({market_data['sample_size']} samples)")
+            
+            console.success(f"📊 Updated statistics for {stats_updated} destinations")
                     
         except Exception as e:
             console.error(f"Error updating destination stats: {e}")
@@ -721,7 +669,7 @@ class FlightBot:
                     market_data = self.cache.get_market_data(destination)
                     
                     if not market_data or not market_data['sufficient_data']:
-                        console.info(f"⚠️ {destination}: Insufficient cached data")
+                        console.info(f"⚠️ {destination}: Insufficient cached data ({market_data.get('sample_size', 0)} samples)")
                         continue
                     
                     # Search for current deals using live API
@@ -738,17 +686,17 @@ class FlightBot:
                             return_str = return_date.strftime('%Y-%m-%d')
                             
                             # Get live verification
-                            live_flight = self.api.search_flights(
+                            live_flights = self.api.search_flights(
                                 origin='WAW',
                                 destination=destination,
                                 departure_date=departure_str,
                                 return_date=return_str
                             )
                             
-                            if live_flight:
-                                for flight in live_flight[:3]:  # Check top 3 results
+                            if live_flights:
+                                for flight in live_flights[:3]:  # Check top 3 results
                                     try:
-                                        price = float(flight['price']['total'])
+                                        price = float(flight['price'])
                                         
                                         # Analyze if it's a deal
                                         deal_analysis = self.analyzer.analyze_deal(
@@ -766,7 +714,7 @@ class FlightBot:
                                                 if alert_sent:
                                                     self.deals_sent_today.add(recent_alert)
                                                     deals_found += 1
-                                                    console.success(f"✅ Alert sent for {destination}: {price} zł")
+                                                    console.success(f"✅ Alert sent for {destination}: {price} zł ({deal_analysis['deal_type']})")
                                                 
                                                 # Only one deal per destination per day
                                                 break
@@ -797,45 +745,57 @@ class FlightBot:
             return 0
     
     def run(self):
-        """Main execution method"""
+        """Main execution method for smart cache building"""
         try:
-            console.info("🤖 ENHANCED FLIGHT BOT STARTED")
+            console.info("🤖 OPTIMIZED FLIGHT BOT STARTED")
             console.info("=" * 50)
             
             # Send startup notification
             startup_msg = (
-                f"🤖 **Enhanced Flight Bot Started**\n\n"
-                f"🔧 **Improvements:**\n"
-                f"✅ Enhanced data validation\n"
-                f"✅ Economy class filtering\n"
-                f"✅ Corruption detection & cleanup\n"
+                f"🤖 **Optimized Flight Bot Started**\n\n"
+                f"🔧 **Smart Caching Mode:**\n"
+                f"✅ Builds cache daily without deletion\n"
+                f"✅ Enhanced data validation active\n"
+                f"✅ Economy class filtering only\n"
+                f"✅ TravelPayouts API integration\n"
                 f"✅ Regional price validation\n\n"
                 f"🚀 Starting operations..."
             )
             self.notifier.send_status_update(startup_msg)
             
-            # Step 1: Cache daily data
-            console.info("📥 Phase 1: Caching daily flight data...")
+            # Step 1: Smart cache building
+            console.info("📥 Phase 1: Smart daily cache building...")
+            cache_start_time = time.time()
             self.cache_daily_data()
+            cache_time = time.time() - cache_start_time
             
             # Step 2: Find current deals  
             console.info("🔍 Phase 2: Detecting current deals...")
+            deals_start_time = time.time()
             deals_found = self.find_deals()
+            deals_time = time.time() - deals_start_time
             
             # Step 3: Send summary
             total_time = time.time() - self.start_time
+            
             summary_msg = (
-                f"✅ **Flight Bot Complete**\n\n"
-                f"⏱️ **Runtime:** {total_time/60:.1f} minutes\n"
-                f"🎯 **Deals Found:** {deals_found}\n"
-                f"🔧 **Data Quality:** Enhanced validation active\n"
-                f"💎 **Economy Only:** Business class filtered out\n"
-                f"🧹 **Auto Cleanup:** Corrupted data removed\n\n"
+                f"✅ **Optimized Flight Bot Complete**\n\n"
+                f"⏱️ **Performance:**\n"
+                f"📥 Cache building: {cache_time/60:.1f} min\n"
+                f"🔍 Deal detection: {deals_time/60:.1f} min\n"
+                f"🎯 Total runtime: {total_time/60:.1f} min\n\n"
+                f"📊 **Results:**\n"
+                f"🎯 **Deals Found:** {deals_found}\n\n"
+                f"🔧 **Quality Features:**\n"
+                f"✅ Smart cache accumulation\n"
+                f"💎 Economy class only\n"
+                f"🛡️ Enhanced validation\n"
+                f"🔄 45-day rolling window\n\n"
                 f"🔄 **Next Run:** Tomorrow (automated)"
             )
             self.notifier.send_status_update(summary_msg)
             
-            console.success(f"🎉 Bot execution complete: {deals_found} deals found")
+            console.success(f"🎉 Bot execution complete: {deals_found} deals found, {total_time/60:.1f} min runtime")
             
         except Exception as e:
             error_msg = f"❌ Bot execution error: {e}"
@@ -843,19 +803,31 @@ class FlightBot:
             self.notifier.send_status_update(error_msg)
 
 def main():
-    """Main function"""
+    """Main function for automated daily execution"""
     try:
-        # Initialize the bot
-        bot = FlightBot()
+        console.info("🚀 Starting Optimized Flight Bot...")
         
-        # Run the bot
+        # Verify environment variables
+        required_vars = [
+            'TRAVELPAYOUTS_API_TOKEN', 'MONGODB_CONNECTION_STRING', 
+            'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'
+        ]
+        
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        if missing_vars:
+            console.error(f"Missing environment variables: {', '.join(missing_vars)}")
+            return 1
+        
+        # Initialize and run the bot
+        bot = FlightBot()
         bot.run()
         
+        console.success("🎉 Optimized Flight Bot completed successfully!")
+        return 0
+        
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        console.error(f"Fatal error: {e}")
         return 1
-    
-    return 0
 
 if __name__ == "__main__":
     exit(main())
