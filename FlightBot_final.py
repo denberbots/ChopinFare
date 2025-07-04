@@ -586,7 +586,8 @@ class FlightBot:
             total_cached = 0
             
             for destination in DESTINATIONS.keys():
-                if destination == 'WAW':  # Skip Warsaw as origin
+                if destination == 'WAW':
+                    continue  # Skip Warsaw as origin
                     continue
                     
                 console.info(f"🔍 Caching flights for {destination}...")
