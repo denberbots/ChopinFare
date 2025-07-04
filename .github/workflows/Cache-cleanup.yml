@@ -24,4 +24,4 @@ jobs:
     - name: Clean Paris Data  # (step name doesn't matter)
       env:
         MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
-      run: python cleanup_paris.py  # This will run your updated script
+run: python cache_cleanup.py
