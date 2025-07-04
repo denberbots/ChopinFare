@@ -65,7 +65,8 @@ class FlightAPI:
             'origin': origin,
             'destination': destination,
             'month': month,
-            'currency': 'pln',
+            'currency': 'PLN',  # Fixed: uppercase currency
+            'show_to_affiliates': True,  # Added required parameter
             'token': self.api_token
         }
         
@@ -74,13 +75,16 @@ class FlightAPI:
             response.raise_for_status()
             data = response.json()
             
+            # Debug API response
+            console.info(f"🔍 Matrix API response for {destination}: success={data.get('success')}, data_count={len(data.get('data', []))}")
+            
             if data.get('success') and data.get('data'):
                 flights = self._extract_matrix_flights(data['data'])
                 valid_flights = [f for f in flights if self._validate_price(f.get('value', 0))]
                 console.info(f"✅ Matrix API: {destination} - {len(valid_flights)} valid flights")
                 return valid_flights
             else:
-                console.warning(f"⚠️ Matrix API: No data for {destination}")
+                console.warning(f"⚠️ Matrix API: No data for {destination} - {data.get('error', 'Unknown error')}")
                 return []
                 
         except requests.RequestException as e:
@@ -98,20 +102,20 @@ class FlightAPI:
             if not isinstance(entry, dict):
                 continue
                 
-            # Extract price and date information
-            price = entry.get('value')
-            departure_at = entry.get('departure_at')
-            return_at = entry.get('return_at')
+            # Matrix API uses different field names
+            price = entry.get('value') or entry.get('price')
+            departure_at = entry.get('depart_date') or entry.get('departure_at') 
+            return_at = entry.get('return_date') or entry.get('return_at')
             
             if price and departure_at:
                 flight = {
                     'value': float(price),
                     'departure_at': departure_at,
-                    'return_at': return_at,
+                    'return_at': return_at or departure_at,  # Use departure if no return
                     'distance': entry.get('distance', 0),
                     'actual': True,
-                    'transfers': entry.get('transfers', 0),
-                    'airline': entry.get('airline', 'Unknown'),
+                    'transfers': entry.get('number_of_changes', entry.get('transfers', 0)),
+                    'airline': entry.get('gate', entry.get('airline', 'Unknown')),
                     'flight_number': entry.get('flight_number', 0),
                     'origin': entry.get('origin', ''),
                     'destination': entry.get('destination', ''),
@@ -193,7 +197,7 @@ class MongoDBManager:
             return False
     
     def insert_flights(self, flights: List[Dict[str, Any]]) -> int:
-        if not flights or not self.flights_collection:
+        if not flights or self.flights_collection is None:
             return 0
         
         try:
@@ -212,7 +216,7 @@ class MongoDBManager:
             return 0
     
     def get_market_statistics(self, destination: str) -> Optional[Dict[str, Any]]:
-        if not self.stats_collection:
+        if self.stats_collection is None:
             return None
         
         try:
@@ -223,7 +227,7 @@ class MongoDBManager:
             return None
     
     def update_statistics(self, destination: str, flights: List[Dict[str, Any]]) -> bool:
-        if not flights or not self.stats_collection:
+        if not flights or self.stats_collection is None:
             return False
         
         try:
@@ -290,7 +294,7 @@ class MongoDBManager:
         return 200 <= price <= 6000
     
     def cache_verified_deal(self, destination: str, deal_data: Dict[str, Any]) -> bool:
-        if not self.deals_collection:
+        if self.deals_collection is None:
             return False
         
         try:
@@ -309,7 +313,7 @@ class MongoDBManager:
             return False
     
     def cleanup_old_data(self, days_to_keep: int = 30) -> bool:
-        if not self.flights_collection:
+        if self.flights_collection is None:
             return False
         
         try:
