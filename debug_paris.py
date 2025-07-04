@@ -58,8 +58,8 @@ def debug_paris_cache():
     verified_count = len([doc for doc in paris_data if doc.get('verified_deal')])
     print(f"\n✅ Verified deals cached: {verified_count}")
     
-    # Check dates
-    dates = list(set([doc['cached_date'] for doc in paris_data]))
+    # Check dates (fix type mismatch)
+    dates = list(set([str(doc['cached_date']) for doc in paris_data]))
     print(f"📅 Cache dates: {sorted(dates)}")
     
     # Get current statistics
