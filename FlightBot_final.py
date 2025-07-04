@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-MongoDB Flight Bot - Complete Production Version
-✅ Fixed Lisbon formatting issue (LIS mapping added)
-✅ Added absolute price thresholds with your exact values
-✅ Combined deal logic: Z-score ≥1.7 OR price < absolute threshold
-✅ Smart deduplication - max 1 deal per dest per day
-✅ Enhanced data validation and economy-only filtering
-✅ Corruption detection and cleaning
-✅ Fixed indentation errors
+Enhanced Flight Bot - Production Ready
+✅ All syntax errors fixed
+✅ Enhanced data validation to prevent corruption
+✅ Economy class filtering only
+✅ Regional price validation
+✅ Automatic corruption detection and cleanup
 """
 
-import asyncio
 import logging
 import os
 import statistics
@@ -64,15 +61,15 @@ MONGO_URI = os.getenv('MONGO_URI')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# Enhanced price validation
-PRICE_LIMITS = (150, 4000)  # Stricter range
-MAX_PRICE_FILTER = 5000     # Reduced from 8000
-MIN_PRICE_FILTER = 100      # New minimum filter
+# Enhanced price validation - stricter to prevent corruption
+PRICE_LIMITS = (150, 4000)  # More realistic range
+MAX_PRICE_FILTER = 5000     # Reduced from 8000 to prevent business class
+MIN_PRICE_FILTER = 100      # Minimum to prevent one-way confusion
 
-# Regional price validation ranges
+# Regional price validation ranges to detect corruption
 REGIONAL_PRICE_RANGES = {
     'europe_west': (200, 1200),    # Paris, Amsterdam, Brussels
-    'europe_close': (150, 800),    # Prague, Vienna, Budapest
+    'europe_close': (150, 800),    # Prague, Vienna, Budapest  
     'europe_north': (300, 1000),   # Oslo, Stockholm, Copenhagen
     'asia_east': (900, 4000),      # Tokyo, Seoul, Shanghai
     'asia_south': (800, 3000),     # Delhi, Mumbai, Bangkok
@@ -86,7 +83,7 @@ REGIONAL_PRICE_RANGES = {
 # Your exact absolute thresholds
 ABSOLUTE_THRESHOLDS = {
     'europe_west': 350,
-    'europe_close': 320,
+    'europe_close': 320, 
     'europe_north': 650,
     'asia_east': 1400,
     'asia_south': 1300,
@@ -135,16 +132,11 @@ DESTINATIONS = {
     'KRK': {'name': 'Kraków', 'country': 'Poland', 'region': 'domestic'},
     'WRO': {'name': 'Wrocław', 'country': 'Poland', 'region': 'domestic'},
     'POZ': {'name': 'Poznań', 'country': 'Poland', 'region': 'domestic'},
-    'SZZ': {'name': 'Szczecin', 'country': 'Poland', 'region': 'domestic'},
-    'RZE': {'name': 'Rzeszów', 'country': 'Poland', 'region': 'domestic'},
-    'LUZ': {'name': 'Lublin', 'country': 'Poland', 'region': 'domestic'},
-    'BZG': {'name': 'Bydgoszcz', 'country': 'Poland', 'region': 'domestic'},
-    'IEG': {'name': 'Zielona Góra', 'country': 'Poland', 'region': 'domestic'},
     'WAW': {'name': 'Warsaw', 'country': 'Poland', 'region': 'domestic'}
 }
 
 class AmadeusAPI:
-    """Enhanced Amadeus API client with better data validation"""
+    """Enhanced Amadeus API client with strict economy-only filtering"""
     
     def __init__(self, api_key: str, api_secret: str):
         self.api_key = api_key
@@ -176,12 +168,12 @@ class AmadeusAPI:
     
     def search_flights(self, origin: str, destination: str, departure_date: str, 
                       return_date: str, adults: int = 1) -> List[Dict]:
-        """Search for flights with enhanced validation"""
+        """Search for flights with enhanced validation for economy only"""
         try:
             token = self._get_access_token()
             url = f"{self.base_url}/v2/shopping/flight-offers"
             
-            # Enhanced parameters for economy only
+            # Enhanced parameters to ensure economy only
             params = {
                 'originLocationCode': origin,
                 'destinationLocationCode': destination,
@@ -191,7 +183,7 @@ class AmadeusAPI:
                 'children': 0,
                 'infants': 0,
                 'travelClass': 'ECONOMY',  # Force economy class
-                'currencyCode': 'PLN',
+                'currencyCode': 'PLN',     # Force PLN currency
                 'max': 250,
                 'nonStop': 'false'
             }
@@ -207,8 +199,33 @@ class AmadeusAPI:
             data = response.json()
             flights = data.get('data', [])
             
-            console.info(f"Found {len(flights)} flights for {origin} → {destination}")
-            return flights
+            # Additional validation to ensure economy only
+            validated_flights = []
+            for flight in flights:
+                try:
+                    # Check travel class in segments
+                    is_economy = True
+                    for itinerary in flight.get('itineraries', []):
+                        for segment in itinerary.get('segments', []):
+                            cabin = segment.get('cabin', 'ECONOMY')
+                            if cabin != 'ECONOMY':
+                                is_economy = False
+                                break
+                        if not is_economy:
+                            break
+                    
+                    # Check price currency
+                    price_info = flight.get('price', {})
+                    currency = price_info.get('currency', 'PLN')
+                    
+                    if is_economy and currency == 'PLN':
+                        validated_flights.append(flight)
+                        
+                except (KeyError, TypeError):
+                    continue
+            
+            console.info(f"Found {len(validated_flights)} economy flights for {origin} → {destination}")
+            return validated_flights
             
         except requests.exceptions.RequestException as e:
             console.error(f"API request failed: {e}")
@@ -218,7 +235,7 @@ class AmadeusAPI:
             return []
 
 class FlightDataValidator:
-    """Enhanced flight data validation"""
+    """Enhanced flight data validation to prevent corruption"""
     
     @staticmethod
     def validate_price(price: float, destination: str) -> bool:
@@ -264,7 +281,7 @@ class FlightDataValidator:
             return False
 
 class MongoDBCache:
-    """Enhanced MongoDB cache with corruption detection"""
+    """Enhanced MongoDB cache with corruption detection and cleanup"""
     
     def __init__(self, uri: str, db_name: str = 'flight_bot_db'):
         self.client = MongoClient(uri)
@@ -546,6 +563,7 @@ class FlightBot:
         self.analyzer = FlightAnalyzer(self.cache)
         self.notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.deals_sent_today = set()
+        self.start_time = time.time()
         
     def cache_daily_data(self):
         """Cache daily flight data with enhanced validation"""
@@ -586,8 +604,7 @@ class FlightBot:
             total_cached = 0
             
             for destination in DESTINATIONS.keys():
-                if destination == 'WAW':
-                    continue  # Skip Warsaw as origin
+                if destination == 'WAW':  # Skip Warsaw as origin
                     continue
                     
                 console.info(f"🔍 Caching flights for {destination}...")
@@ -697,3 +714,148 @@ class FlightBot:
             # Check each destination
             for destination in DESTINATIONS.keys():
                 if destination == 'WAW':
+                    continue
+                
+                try:
+                    # Get market data for this destination
+                    market_data = self.cache.get_market_data(destination)
+                    
+                    if not market_data or not market_data['sufficient_data']:
+                        console.info(f"⚠️ {destination}: Insufficient cached data")
+                        continue
+                    
+                    # Search for current deals using live API
+                    today = datetime.now().date()
+                    
+                    # Check next 3 months for deals
+                    for month_offset in range(3):
+                        departure_month = today + timedelta(days=30 * month_offset)
+                        departure_str = departure_month.strftime('%Y-%m-%d')
+                        
+                        # Try a few return dates
+                        for duration in [3, 7, 10]:
+                            return_date = departure_month + timedelta(days=duration)
+                            return_str = return_date.strftime('%Y-%m-%d')
+                            
+                            # Get live verification
+                            live_flight = self.api.search_flights(
+                                origin='WAW',
+                                destination=destination,
+                                departure_date=departure_str,
+                                return_date=return_str
+                            )
+                            
+                            if live_flight:
+                                for flight in live_flight[:3]:  # Check top 3 results
+                                    try:
+                                        price = float(flight['price']['total'])
+                                        
+                                        # Analyze if it's a deal
+                                        deal_analysis = self.analyzer.analyze_deal(
+                                            destination, price, departure_str, return_str
+                                        )
+                                        
+                                        if deal_analysis['is_deal']:
+                                            # Check if we should alert (avoid duplicates)
+                                            recent_alert = f"{destination}-{today}"
+                                            if recent_alert not in self.deals_sent_today:
+                                                
+                                                # Send alert
+                                                alert_sent = self.notifier.send_deal_alert(destination, deal_analysis)
+                                                
+                                                if alert_sent:
+                                                    self.deals_sent_today.add(recent_alert)
+                                                    deals_found += 1
+                                                    console.success(f"✅ Alert sent for {destination}: {price} zł")
+                                                
+                                                # Only one deal per destination per day
+                                                break
+                                    except (KeyError, ValueError, TypeError) as e:
+                                        console.warning(f"Error processing flight data: {e}")
+                                        continue
+                            
+                            # Rate limiting
+                            time.sleep(0.5)
+                            
+                            # Break after first valid deal found for this destination
+                            if f"{destination}-{today}" in self.deals_sent_today:
+                                break
+                        
+                        # Break after first valid deal found for this destination
+                        if f"{destination}-{today}" in self.deals_sent_today:
+                            break
+                
+                except Exception as e:
+                    console.error(f"Error processing {destination}: {e}")
+                    continue
+            
+            console.success(f"🎯 Deal detection complete: {deals_found} deals found")
+            return deals_found
+            
+        except Exception as e:
+            console.error(f"Error in deal detection: {e}")
+            return 0
+    
+    def run(self):
+        """Main execution method"""
+        try:
+            console.info("🤖 ENHANCED FLIGHT BOT STARTED")
+            console.info("=" * 50)
+            
+            # Send startup notification
+            startup_msg = (
+                f"🤖 **Enhanced Flight Bot Started**\n\n"
+                f"🔧 **Improvements:**\n"
+                f"✅ Enhanced data validation\n"
+                f"✅ Economy class filtering\n"
+                f"✅ Corruption detection & cleanup\n"
+                f"✅ Regional price validation\n\n"
+                f"🚀 Starting operations..."
+            )
+            self.notifier.send_status_update(startup_msg)
+            
+            # Step 1: Cache daily data
+            console.info("📥 Phase 1: Caching daily flight data...")
+            self.cache_daily_data()
+            
+            # Step 2: Find current deals  
+            console.info("🔍 Phase 2: Detecting current deals...")
+            deals_found = self.find_deals()
+            
+            # Step 3: Send summary
+            total_time = time.time() - self.start_time
+            summary_msg = (
+                f"✅ **Flight Bot Complete**\n\n"
+                f"⏱️ **Runtime:** {total_time/60:.1f} minutes\n"
+                f"🎯 **Deals Found:** {deals_found}\n"
+                f"🔧 **Data Quality:** Enhanced validation active\n"
+                f"💎 **Economy Only:** Business class filtered out\n"
+                f"🧹 **Auto Cleanup:** Corrupted data removed\n\n"
+                f"🔄 **Next Run:** Tomorrow (automated)"
+            )
+            self.notifier.send_status_update(summary_msg)
+            
+            console.success(f"🎉 Bot execution complete: {deals_found} deals found")
+            
+        except Exception as e:
+            error_msg = f"❌ Bot execution error: {e}"
+            console.error(error_msg)
+            self.notifier.send_status_update(error_msg)
+
+def main():
+    """Main function"""
+    try:
+        # Initialize the bot
+        bot = FlightBot()
+        
+        # Run the bot
+        bot.run()
+        
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        return 1
+    
+    return 0
+
+if __name__ == "__main__":
+    exit(main())
