@@ -1,10 +1,10 @@
-name: Clean Paris Data  # (name doesn't matter)
+name: Clean Cache Data
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
 
 jobs:
-  cleanup-paris:
+  cleanup-cache:
     runs-on: ubuntu-latest
     
     steps:
@@ -21,7 +21,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install pymongo
     
-    - name: Clean Paris Data  # (step name doesn't matter)
+    - name: Clean Cache Data
       env:
         MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
-run: python cache_cleanup.py
+      run: python cache_cleanup.py
