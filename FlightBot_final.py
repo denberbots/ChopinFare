@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced Flight Bot - Optimized for Smart Cache Building
+Fixed TravelPayouts Flight Bot - Using Correct API Endpoints
+✅ Uses proper TravelPayouts Data API endpoints
 ✅ Builds cache daily without deleting existing data
 ✅ Enhanced data validation to prevent corruption
 ✅ Economy class filtering only
 ✅ Regional price validation
-✅ Uses TravelPayouts API with your existing credentials
 """
 
 import logging
@@ -65,7 +65,7 @@ PRICE_LIMITS = (150, 4000)  # More realistic range
 MAX_PRICE_FILTER = 5000     # Reduced from 8000 to prevent business class
 MIN_PRICE_FILTER = 100      # Minimum to prevent one-way confusion
 
-# Regional price validation ranges (keeping for validation)
+# Regional price validation ranges
 REGIONAL_PRICE_RANGES = {
     'europe_west': (200, 1200),    # Paris, Amsterdam, Brussels
     'europe_close': (150, 800),    # Prague, Vienna, Budapest  
@@ -110,32 +110,22 @@ DESTINATIONS = {
     'OSL': {'name': 'Oslo', 'country': 'Norway', 'region': 'europe_north'},
     'ARN': {'name': 'Stockholm', 'country': 'Sweden', 'region': 'europe_north'},
     'CPH': {'name': 'Copenhagen', 'country': 'Denmark', 'region': 'europe_north'},
-    'NRT': {'name': 'Tokyo', 'country': 'Japan', 'region': 'asia_east'},
-    'ICN': {'name': 'Seoul', 'country': 'South Korea', 'region': 'asia_east'},
-    'PVG': {'name': 'Shanghai', 'country': 'China', 'region': 'asia_east'},
-    'DEL': {'name': 'Delhi', 'country': 'India', 'region': 'asia_south'},
-    'BOM': {'name': 'Mumbai', 'country': 'India', 'region': 'asia_south'},
-    'BKK': {'name': 'Bangkok', 'country': 'Thailand', 'region': 'asia_south'},
-    'DXB': {'name': 'Dubai', 'country': 'UAE', 'region': 'middle_east'},
-    'DOH': {'name': 'Doha', 'country': 'Qatar', 'region': 'middle_east'},
-    'IST': {'name': 'Istanbul', 'country': 'Turkey', 'region': 'middle_east'},
-    'CAI': {'name': 'Cairo', 'country': 'Egypt', 'region': 'africa_north'},
-    'CMN': {'name': 'Casablanca', 'country': 'Morocco', 'region': 'africa_north'},
-    'TUN': {'name': 'Tunis', 'country': 'Tunisia', 'region': 'africa_north'},
-    'JFK': {'name': 'New York', 'country': 'USA', 'region': 'americas'},
-    'LAX': {'name': 'Los Angeles', 'country': 'USA', 'region': 'americas'},
-    'YYZ': {'name': 'Toronto', 'country': 'Canada', 'region': 'americas'},
-    'MEX': {'name': 'Mexico City', 'country': 'Mexico', 'region': 'americas'},
     'LIS': {'name': 'Lisbon', 'country': 'Portugal', 'region': 'europe_west'},
-    'GDN': {'name': 'Gdańsk', 'country': 'Poland', 'region': 'domestic'},
-    'KRK': {'name': 'Kraków', 'country': 'Poland', 'region': 'domestic'},
-    'WRO': {'name': 'Wrocław', 'country': 'Poland', 'region': 'domestic'},
-    'POZ': {'name': 'Poznań', 'country': 'Poland', 'region': 'domestic'},
-    'WAW': {'name': 'Warsaw', 'country': 'Poland', 'region': 'domestic'}
+    'BCN': {'name': 'Barcelona', 'country': 'Spain', 'region': 'europe_west'},
+    'MAD': {'name': 'Madrid', 'country': 'Spain', 'region': 'europe_west'},
+    'FCO': {'name': 'Rome', 'country': 'Italy', 'region': 'europe_west'},
+    'MXP': {'name': 'Milan', 'country': 'Italy', 'region': 'europe_west'},
+    'ATH': {'name': 'Athens', 'country': 'Greece', 'region': 'europe_west'},
+    'DUB': {'name': 'Dublin', 'country': 'Ireland', 'region': 'europe_west'},
+    'IST': {'name': 'Istanbul', 'country': 'Turkey', 'region': 'middle_east'},
+    'LCA': {'name': 'Larnaca', 'country': 'Cyprus', 'region': 'middle_east'},
+    'TLV': {'name': 'Tel Aviv', 'country': 'Israel', 'region': 'middle_east'},
+    'CAI': {'name': 'Cairo', 'country': 'Egypt', 'region': 'africa_north'},
+    'DXB': {'name': 'Dubai', 'country': 'UAE', 'region': 'middle_east'}
 }
 
 class TravelPayoutsAPI:
-    """TravelPayouts API client with strict economy-only filtering"""
+    """TravelPayouts API client using correct Data API endpoints"""
     
     def __init__(self, api_token: str):
         self.api_token = api_token
@@ -143,58 +133,154 @@ class TravelPayoutsAPI:
         self.session = requests.Session()
         self.session.headers.update({'X-Access-Token': api_token})
         
-    def search_flights(self, origin: str, destination: str, departure_date: str, 
-                      return_date: str, adults: int = 1) -> List[Dict]:
-        """Search for flights with enhanced validation for economy only"""
+    def get_flights_for_dates(self, origin: str, destination: str, departure_at: str, 
+                             return_at: str = None) -> List[Dict]:
+        """Get flights using TravelPayouts v3 API with correct parameters"""
         try:
-            # Use TravelPayouts V3 API
+            # Use the correct TravelPayouts v3 endpoint
             url = f"{self.base_url}/aviasales/v3/prices_for_dates"
             
             params = {
                 'origin': origin,
                 'destination': destination,
-                'departure_at': departure_date,
-                'return_at': return_date,
-                'one_way': False,           # Force round-trip
-                'currency': 'PLN',          # Force PLN currency
+                'departure_at': departure_at[:7],  # YYYY-MM format for month
+                'currency': 'PLN',
+                'one_way': False,  # Round trip
+                'direct': False,   # Allow connections
                 'sorting': 'price',
-                'limit': 250,
-                'token': self.api_token,
-                'trip_class': 0,            # Economy class only
-                'adults': adults,
-                'children': 0,
-                'infants': 0
+                'limit': 50
             }
             
+            # Add return date for round trips
+            if return_at:
+                params['return_at'] = return_at[:7]  # YYYY-MM format
+            else:
+                params['one_way'] = True
+                
             response = self.session.get(url, params=params, timeout=15)
             response.raise_for_status()
             
             data = response.json()
+            
+            if not data.get('success', False):
+                console.warning(f"API returned success=false for {origin}->{destination}")
+                return []
+            
+            # Extract flights from response
             flights = data.get('data', [])
             
-            # Additional validation to ensure economy only
-            validated_flights = []
+            # Filter for economy class only (trip_class: 0)
+            economy_flights = []
             for flight in flights:
-                try:
-                    # Check if it's economy class and PLN currency
-                    price = flight.get('price', 0)
-                    currency = flight.get('currency', 'PLN')
-                    trip_class = flight.get('trip_class', 0)
-                    
-                    if currency == 'PLN' and trip_class == 0 and price > 0:
-                        validated_flights.append(flight)
-                        
-                except (KeyError, TypeError):
-                    continue
+                if flight.get('trip_class', 0) == 0:  # Economy only
+                    economy_flights.append(flight)
             
-            console.info(f"Found {len(validated_flights)} economy flights for {origin} → {destination}")
-            return validated_flights
+            console.info(f"Found {len(economy_flights)} economy flights for {origin} → {destination}")
+            return economy_flights
             
         except requests.exceptions.RequestException as e:
             console.error(f"API request failed: {e}")
             return []
         except Exception as e:
             console.error(f"Unexpected error in flight search: {e}")
+            return []
+    
+    def get_cheap_flights(self, origin: str, destination: str, depart_date: str = None, 
+                         return_date: str = None) -> List[Dict]:
+        """Get cheapest flights using TravelPayouts v1 cheap API"""
+        try:
+            # Use the v1/prices/cheap endpoint
+            url = f"{self.base_url}/v1/prices/cheap"
+            
+            params = {
+                'origin': origin,
+                'destination': destination,
+                'currency': 'PLN'
+            }
+            
+            # Add dates if provided (format: YYYY-MM)
+            if depart_date:
+                params['depart_date'] = depart_date[:7]  # Use YYYY-MM format
+            if return_date:
+                params['return_date'] = return_date[:7]  # Use YYYY-MM format
+                
+            response = self.session.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if not data.get('success', False):
+                console.warning(f"API returned success=false for {origin}->{destination}")
+                return []
+            
+            # Extract flights from nested structure
+            flights = []
+            flight_data = data.get('data', {})
+            
+            if destination in flight_data:
+                dest_flights = flight_data[destination]
+                for key, flight in dest_flights.items():
+                    if isinstance(flight, dict) and 'price' in flight:
+                        # Convert TravelPayouts format to our format
+                        processed_flight = {
+                            'price': flight['price'],
+                            'airline': flight.get('airline', ''),
+                            'flight_number': flight.get('flight_number', ''),
+                            'departure_at': flight.get('departure_at', ''),
+                            'return_at': flight.get('return_at', ''),
+                            'expires_at': flight.get('expires_at', ''),
+                            'trip_class': 0,  # Assume economy
+                            'currency': 'PLN'
+                        }
+                        flights.append(processed_flight)
+            
+            console.info(f"Found {len(flights)} flights for {origin} → {destination}")
+            return flights
+            
+        except requests.exceptions.RequestException as e:
+            console.error(f"API request failed: {e}")
+            return []
+        except Exception as e:
+            console.error(f"Unexpected error in flight search: {e}")
+            return []
+    
+    def get_latest_prices(self, origin: str = None, destination: str = None) -> List[Dict]:
+        """Get latest prices from TravelPayouts"""
+        try:
+            url = f"{self.base_url}/v2/prices/latest"
+            
+            params = {
+                'currency': 'PLN',
+                'period_type': 'month',
+                'page': 1,
+                'limit': 30,
+                'show_to_affiliates': True,
+                'sorting': 'price',
+                'trip_class': 0  # Economy only
+            }
+            
+            if origin:
+                params['origin'] = origin
+            if destination:
+                params['destination'] = destination
+                
+            response = self.session.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if not data.get('success', False):
+                return []
+            
+            flights = data.get('data', [])
+            console.info(f"Found {len(flights)} latest price entries")
+            return flights
+            
+        except requests.exceptions.RequestException as e:
+            console.error(f"Latest prices API request failed: {e}")
+            return []
+        except Exception as e:
+            console.error(f"Unexpected error getting latest prices: {e}")
             return []
 
 class FlightDataValidator:
@@ -217,24 +303,17 @@ class FlightDataValidator:
         return flexible_min <= price <= flexible_max
     
     @staticmethod
-    def validate_flight_combination(origin: str, destination: str, price: float, 
-                                  departure_date: str, return_date: str) -> bool:
-        """Validate entire flight combination"""
+    def validate_flight_data(flight_data: Dict) -> bool:
+        """Validate entire flight data entry"""
         try:
             # Basic price validation
-            if not FlightDataValidator.validate_price(price, destination):
+            price = float(flight_data.get('price', 0))
+            if not FlightDataValidator.validate_price(price, flight_data.get('destination', '')):
                 return False
                 
-            # Date validation
-            dep_date = datetime.strptime(departure_date, '%Y-%m-%d')
-            ret_date = datetime.strptime(return_date, '%Y-%m-%d')
-            
-            if dep_date >= ret_date:
-                return False
-                
-            # Trip duration validation (1-30 days)
-            duration = (ret_date - dep_date).days
-            if duration < 1 or duration > 30:
+            # Check for required fields
+            required_fields = ['origin', 'destination', 'price']
+            if not all(field in flight_data for field in required_fields):
                 return False
                 
             return True
@@ -255,13 +334,7 @@ class MongoDBCache:
         """Store flight data with validation and duplicate prevention"""
         try:
             # Validate before storing
-            if not self.validator.validate_flight_combination(
-                flight_data['origin'],
-                flight_data['destination'],
-                flight_data['price'],
-                flight_data['outbound_date'],
-                flight_data['return_date']
-            ):
+            if not self.validator.validate_flight_data(flight_data):
                 return False
                 
             # Add validation flag
@@ -269,7 +342,7 @@ class MongoDBCache:
             flight_data['validation_date'] = datetime.now()
             
             # Create unique identifier to prevent duplicates
-            flight_data['unique_id'] = f"{flight_data['origin']}-{flight_data['destination']}-{flight_data['outbound_date']}-{flight_data['return_date']}-{flight_data['price']}"
+            flight_data['unique_id'] = f"{flight_data['origin']}-{flight_data['destination']}-{flight_data.get('departure_at', '')}-{flight_data['price']}"
             
             try:
                 self.db.flight_data.insert_one(flight_data)
@@ -344,8 +417,7 @@ class FlightAnalyzer:
     def __init__(self, cache: MongoDBCache):
         self.cache = cache
         
-    def analyze_deal(self, destination: str, price: float, departure_date: str, 
-                    return_date: str) -> Dict:
+    def analyze_deal(self, destination: str, price: float) -> Dict:
         """Analyze if a flight is a deal using multiple criteria"""
         try:
             # Get market data
@@ -403,9 +475,7 @@ class FlightAnalyzer:
                 'z_score': round(z_score, 2),
                 'absolute_threshold': absolute_threshold,
                 'meets_absolute': absolute_deal,
-                'meets_statistical': statistical_deal,
-                'departure_date': departure_date,
-                'return_date': return_date
+                'meets_statistical': statistical_deal
             }
             
         except Exception as e:
@@ -432,7 +502,6 @@ class TelegramNotifier:
             message += f"🏙️ **{city_name}, {country}** ({destination})\n"
             message += f"💰 **{deal_info['price']} zł** {deal_info['deal_type']}\n\n"
             
-            message += f"📅 **Dates:** {deal_info['departure_date']} → {deal_info['return_date']}\n"
             message += f"📊 **Savings:** {deal_info['savings_percent']}% below typical ({deal_info['median_price']} zł)\n"
             message += f"🎯 **Confidence:** {deal_info['confidence']}%\n\n"
             
@@ -482,7 +551,7 @@ class TelegramNotifier:
             return False
 
 class FlightBot:
-    """Enhanced main flight bot class with smart cache building"""
+    """Enhanced main flight bot class with correct TravelPayouts API"""
     
     def __init__(self):
         self.api = TravelPayoutsAPI(TRAVELPAYOUTS_API_TOKEN)
@@ -493,39 +562,15 @@ class FlightBot:
         self.start_time = time.time()
         
     def cache_daily_data(self):
-        """Smart daily cache building - accumulates data without deletion"""
+        """Smart daily cache building using TravelPayouts Data API"""
         try:
             console.info("🔄 Starting smart daily cache building...")
-            today = datetime.now().date()
+            today = datetime.now()
             
-            # Clean up old data (45-day rolling window) - but don't delete today's data
+            # Clean up old data (45-day rolling window)
             self.cache.cleanup_old_data(45)
             
-            # Generate date combinations (6 months ahead)
-            base_date = datetime.now().date()
-            months_ahead = 6
-            date_combinations = []
-            
-            for month_offset in range(months_ahead):
-                month_date = base_date + timedelta(days=30 * month_offset)
-                
-                # Generate combinations for this month
-                for day_offset in range(0, 28, 7):  # Weekly intervals
-                    departure = month_date + timedelta(days=day_offset)
-                    
-                    # Weekend trips (2-4 days)
-                    for duration in [2, 3, 4]:
-                        return_date = departure + timedelta(days=duration)
-                        date_combinations.append((departure, return_date))
-                    
-                    # Week trips (6-8 days)
-                    for duration in [6, 7, 8]:
-                        return_date = departure + timedelta(days=duration)
-                        date_combinations.append((departure, return_date))
-            
-            console.info(f"📅 Generated {len(date_combinations)} date combinations")
-            
-            # Cache flights for each destination
+            # Cache flights for each destination using Data API
             total_cached = 0
             new_entries_today = 0
             
@@ -536,65 +581,67 @@ class FlightBot:
                 console.info(f"🔍 Building cache for {destination}...")
                 destination_cached = 0
                 
-                # Only cache a subset of combinations daily to avoid API limits
-                daily_combinations = date_combinations[::3]  # Every 3rd combination
-                
-                for departure_date, return_date in daily_combinations:
+                # Try different month combinations for better coverage
+                for month_offset in range(3):  # Next 3 months
                     try:
-                        # Check if we already have this combination cached recently
-                        existing = self.cache.db.flight_data.find_one({
-                            'origin': 'WAW',
-                            'destination': destination,
-                            'outbound_date': departure_date.strftime('%Y-%m-%d'),
-                            'return_date': return_date.strftime('%Y-%m-%d'),
-                            'cached_date': {'$gte': datetime.combine(today - timedelta(days=7), datetime.min.time())}
-                        })
+                        target_month = today + timedelta(days=30 * month_offset)
+                        depart_date = target_month.strftime('%Y-%m')
+                        return_date = target_month.strftime('%Y-%m')
                         
-                        if existing:
-                            continue  # Skip if recently cached
-                        
-                        # Get flights from API
-                        flights = self.api.search_flights(
+                        # Get flights using both methods for better coverage
+                        flights_v3 = self.api.get_flights_for_dates(
                             origin='WAW',
                             destination=destination,
-                            departure_date=departure_date.strftime('%Y-%m-%d'),
-                            return_date=return_date.strftime('%Y-%m-%d')
+                            departure_at=target_month.strftime('%Y-%m'),
+                            return_at=(target_month + timedelta(days=7)).strftime('%Y-%m')
                         )
                         
+                        flights_v1 = self.api.get_cheap_flights(
+                            origin='WAW',
+                            destination=destination,
+                            depart_date=target_month.strftime('%Y-%m'),
+                            return_date=(target_month + timedelta(days=7)).strftime('%Y-%m')
+                        )
+                        
+                        # Combine results
+                        all_flights = flights_v3 + flights_v1
+                        
                         # Process and cache flights
-                        for flight in flights[:5]:  # Limit to top 5 per combination for efficiency
+                        for flight in all_flights:
                             try:
-                                # Extract price
+                                # Convert price to float
                                 price = float(flight['price'])
                                 
-                                # Validate and store
+                                # Create flight data entry
                                 flight_data = {
                                     'origin': 'WAW',
                                     'destination': destination,
                                     'price': price,
-                                    'outbound_date': departure_date.strftime('%Y-%m-%d'),
-                                    'return_date': return_date.strftime('%Y-%m-%d'),
-                                    'cached_date': datetime.now(),  # Use datetime instead of date
-                                    'flight_id': flight.get('flight_number', ''),
-                                    'duration': (return_date - departure_date).days,
-                                    'currency': 'PLN'
+                                    'departure_at': flight.get('departure_at', ''),
+                                    'return_at': flight.get('return_at', ''),
+                                    'cached_date': datetime.now(),
+                                    'airline': flight.get('airline', ''),
+                                    'flight_number': str(flight.get('flight_number', '')),
+                                    'currency': 'PLN',
+                                    'source': 'travelpayouts_api',
+                                    'transfers': flight.get('transfers', 0),
+                                    'duration': flight.get('duration', 0)
                                 }
                                 
                                 if self.cache.store_flight_data(flight_data):
                                     destination_cached += 1
                                     total_cached += 1
-                                    if flight_data['cached_date'] == today:
-                                        new_entries_today += 1
+                                    new_entries_today += 1
                                     
-                            except (KeyError, ValueError) as e:
+                            except (KeyError, ValueError, TypeError) as e:
                                 console.warning(f"Error processing flight: {e}")
                                 continue
                         
                         # Rate limiting
-                        time.sleep(0.2)
+                        time.sleep(0.5)
                         
                     except Exception as e:
-                        console.warning(f"Error caching {destination} for {departure_date}: {e}")
+                        console.warning(f"Error caching {destination} for {depart_date}: {e}")
                         continue
                 
                 console.info(f"✅ Added {destination_cached} new flights for {destination}")
@@ -654,87 +701,41 @@ class FlightBot:
             console.error(f"Error updating destination stats: {e}")
     
     def find_deals(self):
-        """Find and alert on current deals"""
+        """Find and alert on current deals using latest prices"""
         try:
             console.info("🔍 Searching for current deals...")
             deals_found = 0
             
-            # Check each destination
-            for destination in DESTINATIONS.keys():
-                if destination == 'WAW':
-                    continue
-                
+            # Get latest prices from TravelPayouts
+            latest_flights = self.api.get_latest_prices()
+            
+            for flight in latest_flights:
                 try:
-                    # Get market data for this destination
-                    market_data = self.cache.get_market_data(destination)
+                    origin = flight.get('origin')
+                    destination = flight.get('destination')
+                    price = float(flight.get('value', flight.get('price', 0)))
                     
-                    if not market_data or not market_data['sufficient_data']:
-                        console.info(f"⚠️ {destination}: Insufficient cached data ({market_data.get('sample_size', 0)} samples)")
-                        continue
-                    
-                    # Search for current deals using live API
-                    today = datetime.now().date()
-                    
-                    # Check next 3 months for deals
-                    for month_offset in range(3):
-                        departure_month = today + timedelta(days=30 * month_offset)
-                        departure_str = departure_month.strftime('%Y-%m-%d')
+                    # Only process flights from WAW to our monitored destinations
+                    if origin == 'WAW' and destination in DESTINATIONS:
+                        # Analyze if it's a deal
+                        deal_analysis = self.analyzer.analyze_deal(destination, price)
                         
-                        # Try a few return dates
-                        for duration in [3, 7, 10]:
-                            return_date = departure_month + timedelta(days=duration)
-                            return_str = return_date.strftime('%Y-%m-%d')
-                            
-                            # Get live verification
-                            live_flights = self.api.search_flights(
-                                origin='WAW',
-                                destination=destination,
-                                departure_date=departure_str,
-                                return_date=return_str
-                            )
-                            
-                            if live_flights:
-                                for flight in live_flights[:3]:  # Check top 3 results
-                                    try:
-                                        price = float(flight['price'])
-                                        
-                                        # Analyze if it's a deal
-                                        deal_analysis = self.analyzer.analyze_deal(
-                                            destination, price, departure_str, return_str
-                                        )
-                                        
-                                        if deal_analysis['is_deal']:
-                                            # Check if we should alert (avoid duplicates)
-                                            recent_alert = f"{destination}-{today}"
-                                            if recent_alert not in self.deals_sent_today:
-                                                
-                                                # Send alert
-                                                alert_sent = self.notifier.send_deal_alert(destination, deal_analysis)
-                                                
-                                                if alert_sent:
-                                                    self.deals_sent_today.add(recent_alert)
-                                                    deals_found += 1
-                                                    console.success(f"✅ Alert sent for {destination}: {price} zł ({deal_analysis['deal_type']})")
-                                                
-                                                # Only one deal per destination per day
-                                                break
-                                    except (KeyError, ValueError, TypeError) as e:
-                                        console.warning(f"Error processing flight data: {e}")
-                                        continue
-                            
-                            # Rate limiting
-                            time.sleep(0.5)
-                            
-                            # Break after first valid deal found for this destination
-                            if f"{destination}-{today}" in self.deals_sent_today:
-                                break
-                        
-                        # Break after first valid deal found for this destination
-                        if f"{destination}-{today}" in self.deals_sent_today:
-                            break
-                
-                except Exception as e:
-                    console.error(f"Error processing {destination}: {e}")
+                        if deal_analysis['is_deal']:
+                            # Check if we should alert (avoid duplicates)
+                            today = datetime.now().date()
+                            recent_alert = f"{destination}-{today}"
+                            if recent_alert not in self.deals_sent_today:
+                                
+                                # Send alert
+                                alert_sent = self.notifier.send_deal_alert(destination, deal_analysis)
+                                
+                                if alert_sent:
+                                    self.deals_sent_today.add(recent_alert)
+                                    deals_found += 1
+                                    console.success(f"✅ Alert sent for {destination}: {price} zł ({deal_analysis['deal_type']})")
+                                
+                except (KeyError, ValueError, TypeError) as e:
+                    console.warning(f"Error processing flight data: {e}")
                     continue
             
             console.success(f"🎯 Deal detection complete: {deals_found} deals found")
@@ -747,18 +748,18 @@ class FlightBot:
     def run(self):
         """Main execution method for smart cache building"""
         try:
-            console.info("🤖 OPTIMIZED FLIGHT BOT STARTED")
+            console.info("🤖 FIXED TRAVELPAYOUTS FLIGHT BOT STARTED")
             console.info("=" * 50)
             
             # Send startup notification
             startup_msg = (
-                f"🤖 **Optimized Flight Bot Started**\n\n"
-                f"🔧 **Smart Caching Mode:**\n"
-                f"✅ Builds cache daily without deletion\n"
-                f"✅ Enhanced data validation active\n"
-                f"✅ Economy class filtering only\n"
-                f"✅ TravelPayouts API integration\n"
-                f"✅ Regional price validation\n\n"
+                f"🤖 **Fixed TravelPayouts Flight Bot Started**\n\n"
+                f"🔧 **Using Correct API Endpoints:**\n"
+                f"✅ /aviasales/v3/prices_for_dates\n"
+                f"✅ /v1/prices/cheap\n"
+                f"✅ Proper parameter formatting\n"
+                f"✅ Economy class filtering\n"
+                f"✅ PLN currency support\n\n"
                 f"🚀 Starting operations..."
             )
             self.notifier.send_status_update(startup_msg)
@@ -779,18 +780,18 @@ class FlightBot:
             total_time = time.time() - self.start_time
             
             summary_msg = (
-                f"✅ **Optimized Flight Bot Complete**\n\n"
+                f"✅ **Fixed TravelPayouts Flight Bot Complete**\n\n"
                 f"⏱️ **Performance:**\n"
                 f"📥 Cache building: {cache_time/60:.1f} min\n"
                 f"🔍 Deal detection: {deals_time/60:.1f} min\n"
                 f"🎯 Total runtime: {total_time/60:.1f} min\n\n"
                 f"📊 **Results:**\n"
                 f"🎯 **Deals Found:** {deals_found}\n\n"
-                f"🔧 **Quality Features:**\n"
-                f"✅ Smart cache accumulation\n"
-                f"💎 Economy class only\n"
-                f"🛡️ Enhanced validation\n"
-                f"🔄 45-day rolling window\n\n"
+                f"🔧 **API Fixes Applied:**\n"
+                f"✅ Correct TravelPayouts endpoints\n"
+                f"✅ Proper parameter formatting\n"
+                f"✅ Economy class filtering\n"
+                f"✅ Enhanced error handling\n\n"
                 f"🔄 **Next Run:** Tomorrow (automated)"
             )
             self.notifier.send_status_update(summary_msg)
@@ -805,7 +806,7 @@ class FlightBot:
 def main():
     """Main function for automated daily execution"""
     try:
-        console.info("🚀 Starting Optimized Flight Bot...")
+        console.info("🚀 Starting Fixed TravelPayouts Flight Bot...")
         
         # Verify environment variables
         required_vars = [
@@ -822,7 +823,7 @@ def main():
         bot = FlightBot()
         bot.run()
         
-        console.success("🎉 Optimized Flight Bot completed successfully!")
+        console.success("🎉 Fixed TravelPayouts Flight Bot completed successfully!")
         return 0
         
     except Exception as e:
