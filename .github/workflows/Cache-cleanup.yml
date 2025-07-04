@@ -1,7 +1,7 @@
-name: Clean Paris Data
+name: Clean Paris Data  # (name doesn't matter)
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   cleanup-paris:
@@ -21,7 +21,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install pymongo
     
-    - name: Clean Paris Data
+    - name: Clean Paris Data  # (step name doesn't matter)
       env:
         MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
-      run: python cleanup_paris.py
+      run: python cleanup_paris.py  # This will run your updated script
