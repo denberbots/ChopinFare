@@ -593,10 +593,27 @@ class FlightBot:
         self.start_time = time.time()
         
     def cache_daily_data(self):
-        """Smart daily cache building - preserves good data, only clears corruption"""
+        """Smart daily cache building - with FORCED Paris cleanup"""
         try:
             console.info("🔄 Starting smart daily cache building...")
             today = datetime.now().date()
+            
+            # FORCE CLEAR PARIS DATA - One-time cleanup
+            console.info("🧹 FORCING Paris (CDG) data cleanup...")
+            try:
+                # Clear all Paris flight data
+                result1 = self.cache.db.flight_data.delete_many({'destination': 'CDG'})
+                console.success(f"🧹 Cleared {result1.deleted_count} corrupted Paris flight entries")
+                
+                # Clear Paris stats
+                result2 = self.cache.db.destination_stats.delete_one({'destination': 'CDG'})
+                if result2.deleted_count > 0:
+                    console.success(f"🧹 Cleared corrupted Paris statistics")
+                
+                console.success("✅ Paris corruption cleanup COMPLETE - will rebuild with clean data")
+                
+            except Exception as e:
+                console.error(f"Error during Paris cleanup: {e}")
             
             # Clean up old data (45-day rolling window)
             self.cache.cleanup_old_data(45)
@@ -867,6 +884,9 @@ class FlightBot:
             # Send startup notification
             startup_msg = (
                 f"🤖 **Enhanced Flight Bot Started**\n\n"
+                f"🧹 **SPECIAL RUN: Paris Cleanup Mode**\n"
+                f"⚠️ Will force clear corrupted Paris data\n"
+                f"🔧 Then rebuild with clean economy prices\n\n"
                 f"🔧 **Smart Caching Mode:**\n"
                 f"✅ Preserves good historical data\n"
                 f"✅ Only clears detected corruption\n"
@@ -875,7 +895,7 @@ class FlightBot:
                 f"📊 **Current Cache:**\n"
                 f"📁 {cache_summary['total_entries']:,} validated entries\n"
                 f"🎯 {cache_summary['ready_destinations']} destinations ready\n\n"
-                f"🚀 Starting daily operations..."
+                f"🚀 Starting Paris cleanup and daily operations..."
             )
             self.notifier.send_status_update(startup_msg)
             
