@@ -204,6 +204,10 @@ class FlightAPI:
             console.info(f"✅ V3 API: Found {len(flights)} flights in RUB")
             
             if flights:
+                # DEBUG: Show original RUB prices before conversion
+                original_prices = [f.get('value', 0) for f in flights]
+                console.info(f"🔍 DEBUG: Original RUB prices from V3 API: {original_prices}")
+                
                 # FIXED: Convert RUB prices to PLN
                 for flight in flights:
                     if 'value' in flight:
@@ -212,12 +216,16 @@ class FlightAPI:
                         flight['value'] = pln_price
                         flight['original_currency'] = 'RUB'
                         flight['original_price'] = rub_price
-                        console.info(f"💱 Converted {rub_price:.0f} RUB → {pln_price:.0f} PLN")
+                        console.info(f"💱 Converted {rub_price:.0f} RUB → {pln_price:.0f} PLN (valid: {self._validate_price(pln_price)})")
                 
                 valid_flights = [f for f in flights if self._validate_price(f.get('value', 0))]
                 
                 if not valid_flights:
                     console.warning(f"❌ V3 API: No flights within valid price range (200-6000 PLN) after conversion")
+                    # DEBUG: Show what prices we got
+                    all_pln_prices = [f.get('value', 0) for f in flights]
+                    console.warning(f"🔍 DEBUG: Converted PLN prices were: {all_pln_prices}")
+                    console.warning(f"🔍 DEBUG: Valid range is 200-6000 PLN")
                     return None
                 
                 cheapest = min(valid_flights, key=lambda x: x.get('value', float('inf')))
@@ -695,9 +703,9 @@ class FlightBot:
                             verification_method = "v3-fixed-rub"
                             console.info(f"  ✅ FIXED V3 verification successful: {verified_price:.0f} PLN (converted from RUB)")
                         else:
-                            # FALLBACK: Use Matrix price with higher threshold
-                            console.info(f"  ⚠️ V3 verification failed, using Matrix price with higher threshold")
-                            if z_score >= (self.z_score_threshold + 1.0):
+                            # FALLBACK: Use Matrix price with lower threshold (more aggressive)
+                            console.info(f"  ⚠️ V3 verification failed, using Matrix price with lower threshold")
+                            if z_score >= (self.z_score_threshold + 0.5):  # Changed from +1.0 to +0.5
                                 verified_price = round_trip_price
                                 verification = {
                                     'value': verified_price,
@@ -706,7 +714,7 @@ class FlightBot:
                                     'airline': combo.get('airline', 'Unknown')
                                 }
                                 verification_method = "matrix-fallback"
-                                console.info(f"  ⚡ Using Matrix price as fallback: {verified_price:.0f} PLN (high Z-score: {z_score:.2f})")
+                                console.info(f"  ⚡ Using Matrix price as fallback: {verified_price:.0f} PLN (Z-score: {z_score:.2f})")
                         
                         if verified_price:
                             verified_z_score = (market_data['median_price'] - verified_price) / market_data['std_dev']
