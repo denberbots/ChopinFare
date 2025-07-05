@@ -1,0 +1,17 @@
+# .github/workflows/check-cache.yml
+name: Check Cache Status
+on:
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  check-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - run: pip install pymongo
+      - run: python check_cache.py
+        env:
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
