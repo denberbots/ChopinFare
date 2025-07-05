@@ -51,8 +51,8 @@ class FlightAPI:
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': 'FlightBot/1.0'})
         
-        # Currency conversion rate: 1 RUB = 0.044 PLN (approximate)
-        self.rub_to_pln_rate = 0.044
+        # Currency conversion rate: 1 RUB = 0.0456 PLN (current rate as of July 2025)
+        self.rub_to_pln_rate = 0.0456
     
     def _validate_price(self, price: float) -> bool:
         """Validate price is within reasonable range for PLN"""
