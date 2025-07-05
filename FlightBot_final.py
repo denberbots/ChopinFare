@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 MongoDB Flight Bot - Complete Production Version
-✅ Fixed Lisbon formatting issue (LIS mapping added)
-✅ Added absolute price thresholds with your exact values
+✅ Updated with new country-specific absolute thresholds
 ✅ Combined deal logic: Z-score ≥1.7 OR price < absolute threshold
 ✅ Smart deduplication - max 1 deal per destination per run
 ✅ MongoDB 45-day cache with always-update logic
 ✅ All 150+ destinations properly mapped with flags/countries
 
-Thresholds: Europe Close 250zł, Europe West 350zł, Middle East Gulf 750zł, etc.
+Updated thresholds: Italy 300zł, Spain 350zł, UK 350zł, etc.
 Ready for GitHub Actions deployment - just copy, paste, and commit!
 """
 
@@ -467,113 +466,64 @@ class SmartAPI:
     PRICE_LIMITS = (200, 6000)
     MAX_PRICE_FILTER = 8000
     
-    # YOUR EXACT ABSOLUTE DEAL THRESHOLDS
+    # NEW COUNTRY-SPECIFIC ABSOLUTE DEAL THRESHOLDS
     ABSOLUTE_DEAL_THRESHOLDS = {
-        'europe_close': 250,        # Scandinavia, Balkans, Eastern Europe
-        'europe_west': 350,         # UK, France, Germany, Spain, Italy
-        'middle_east_close': 700,   # Turkey, Israel, Egypt
-        'middle_east_gulf': 750,    # UAE, Qatar, Saudi Arabia
-        'north_africa': 650,        # Morocco, Tunisia
-        'asia_close': 1100,         # Central Asia, Russia
-        'asia_southeast': 1600,     # Thailand, Indonesia, Malaysia  
-        'asia_east': 1700,          # Japan, South Korea, China
-        'asia_south': 1400,         # India, Sri Lanka
-        'north_america_east': 1700, # New York, Toronto, Montreal
-        'north_america_west': 2200, # LA, Vancouver, Seattle
-        'central_america': 2200,    # Mexico, Cuba
-        'south_america': 2800,      # Brazil, Argentina
-        'east_africa': 1500,        # Tanzania (Zanzibar), Madagascar
-        'west_africa': 2200,        # Ghana, Nigeria, Senegal
-        'south_africa': 2500        # South Africa
-    }
-    
-    # Detailed region mappings for absolute thresholds
-    ABSOLUTE_REGIONS = {
-        # Europe Close (Scandinavia, Balkans, Eastern Europe)
-        **{dest: 'europe_close' for dest in [
-            'ARN', 'NYO', 'OSL', 'BGO', 'BOO', 'CPH', 'HEL', 'RVN', 'KEF',  # Scandinavia/Nordic
-            'VAR', 'BOJ', 'SOF', 'OTP', 'CLJ', 'BEG', 'SPU', 'DBV', 'ZAD',  # Balkans
-            'TIV', 'TGD', 'TIA', 'SKG', 'BUD', 'PRG', 'BRU', 'CRL', 'KRK', 'KTW',  # Eastern Europe
-            'LED', 'KGD', 'MSQ', 'EVN', 'TBS', 'GYD', 'KUT'  # Eastern Europe/Caucasus
-        ]},
-        
-        # Europe West (UK, France, Germany, Spain, Italy, etc.)
-        **{dest: 'europe_west' for dest in [
-            'LHR', 'LTN', 'LGW', 'STN', 'GLA', 'BFS', 'DUB',  # UK/Ireland
-            'CDG', 'ORY', 'NCE', 'MRS', 'BIQ', 'PIS', 'PUY',  # France
-            'FRA', 'MUC', 'BER', 'HAM', 'STR', 'DUS', 'CGN', 'LEJ', 'DTM',  # Germany
-            'MAD', 'BCN', 'PMI', 'IBZ', 'VLC', 'ALC', 'AGP', 'BIO', 'LPA', 'TFS', 'SPC',  # Spain
-            'FCO', 'MXP', 'LIN', 'BGY', 'CIA', 'VCE', 'NAP', 'PMO', 'BLQ', 'FLR', 'PSA',  # Italy
-            'CAG', 'BRI', 'CTA', 'BUS', 'AHO', 'GOA',  # Italy continued
-            'AMS', 'RTM', 'EIN', 'ZUR', 'BSL', 'GVA', 'LIS', 'OPO', 'PDL', 'PXO',  # Netherlands/Switzerland/Portugal
-            'VIE', 'ATH', 'CFU', 'HER', 'RHO', 'ZTH', 'JTR', 'CHQ'  # Austria/Greece
-        ]},
-        
-        # Middle East Close (Turkey, Israel, Egypt)
-        **{dest: 'middle_east_close' for dest in [
-            'AYT', 'IST', 'SAW', 'ESB', 'IZM', 'ADB', 'TLV', 'SSH', 'CAI'
-        ]},
-        
-        # Middle East Gulf (UAE, Qatar, Saudi Arabia)
-        **{dest: 'middle_east_gulf' for dest in [
-            'DXB', 'SHJ', 'AUH', 'DWC', 'DOH', 'RUH', 'JED', 'DMM'
-        ]},
-        
-        # North Africa
-        **{dest: 'north_africa' for dest in [
-            'RAK', 'DJE'
-        ]},
-        
-        # Asia Close (Central Asia, Russia)
-        **{dest: 'asia_close' for dest in [
-            'SVO', 'DME', 'VKO', 'AER', 'OVB', 'IKT', 'ULV', 'KJA', 'FRU', 'TAS'
-        ]},
-        
-        # Asia Southeast
-        **{dest: 'asia_southeast' for dest in [
-            'BKK', 'DMK', 'HKT', 'DPS'
-        ]},
-        
-        # Asia East
-        **{dest: 'asia_east' for dest in [
-            'NRT', 'HND', 'KIX', 'ITM', 'ICN', 'GMP', 'PEK'
-        ]},
-        
-        # Asia South
-        **{dest: 'asia_south' for dest in [
-            'DEL', 'CMB'
-        ]},
-        
-        # North America East
-        **{dest: 'north_america_east' for dest in [
-            'EWR', 'JFK', 'LGA', 'PHL', 'YYZ', 'MIA'
-        ]},
-        
-        # North America West
-        **{dest: 'north_america_west' for dest in [
-            'YWG', 'YEG'
-        ]},
-        
-        # Central America
-        **{dest: 'central_america' for dest in [
-            'HAV', 'PUJ'
-        ]},
-        
-        # South America
-        **{dest: 'south_america' for dest in [
-            'SYD'  # Note: SYD is actually Australia, might need adjustment
-        ]},
-        
-        # East Africa
-        **{dest: 'east_africa' for dest in [
-            'ZNZ', 'TNR'
-        ]},
-        
-        # West Africa (empty for now)
-        **{dest: 'west_africa' for dest in []},
-        
-        # South Africa (empty for now)
-        **{dest: 'south_africa' for dest in []}
+        # Countries mapped to their specific thresholds in PLN
+        'Italy': 300,
+        'Spain': 350,
+        'United Kingdom': 350,
+        'France': 350,
+        'Germany': 300,
+        'Netherlands': 350,
+        'Greece': 450,
+        'Portugal': 450,
+        'Sweden': 300,
+        'Norway': 350,
+        'Finland': 350,
+        'Iceland': 500,
+        'Denmark': 300,
+        'Austria': 300,
+        'Czech Republic': 250,
+        'Belgium': 300,
+        'Switzerland': 350,
+        'Hungary': 250,
+        'Ireland': 450,
+        'Bulgaria': 300,
+        'Romania': 300,
+        'Croatia': 350,
+        'Serbia': 300,
+        'Montenegro': 300,
+        'Albania': 300,
+        'Poland': 999999,  # Domestic - set very high to exclude
+        'Russia': 600,
+        'Belarus': 500,
+        'Turkey': 600,
+        'Israel': 700,
+        'Armenia': 600,
+        'Georgia': 550,
+        'Azerbaijan': 600,
+        'United Arab Emirates': 950,
+        'Qatar': 1000,
+        'Saudi Arabia': 1050,
+        'Egypt': 850,
+        'Kyrgyzstan': 1200,
+        'Uzbekistan': 1200,
+        'Thailand': 1600,
+        'Indonesia': 1800,
+        'South Korea': 1900,
+        'Japan': 2000,
+        'China': 1900,
+        'Sri Lanka': 1800,
+        'India': 1600,
+        'Australia': 2800,
+        'United States': 1800,
+        'Canada': 1900,
+        'Cuba': 1900,
+        'Dominican Republic': 1900,
+        'Morocco': 700,
+        'Tunisia': 700,
+        'Tanzania': 2100,
+        'Madagascar': 2400
     }
     
     # Legacy regions for duration constraints (keep existing)
@@ -607,9 +557,11 @@ class SmartAPI:
         return self.DURATION_CONSTRAINTS[region]
     
     def get_absolute_threshold(self, destination: str) -> float:
-        """Get absolute price threshold for destination"""
-        region = self.ABSOLUTE_REGIONS.get(destination, 'europe_west')  # Default to europe_west
-        return self.ABSOLUTE_DEAL_THRESHOLDS[region]
+        """Get absolute price threshold for destination based on country"""
+        # Get country from the _COUNTRIES mapping in VerifiedDeal class
+        country = VerifiedDeal._COUNTRIES.get(destination, 'Unknown')
+        # Return threshold for that country, default to 350 PLN if country not found
+        return self.ABSOLUTE_DEAL_THRESHOLDS.get(country, 350)
     
     def _validate_flight_data(self, price: float, departure_date: str, month: str) -> bool:
         """Validate flight data"""
@@ -1016,7 +968,7 @@ class MongoFlightBot:
                       f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
-                      f"⚡ Z-score ≥1.7 OR Absolute thresholds | Smart deduplication active\n"
+                      f"⚡ Z-score ≥1.7 OR Country-specific thresholds | Smart deduplication active\n"
                       f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
         
         if not self.telegram.send(startup_msg):
@@ -1114,7 +1066,7 @@ class MongoFlightBot:
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
-                      f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} OR absolute thresholds required)\n\n"
+                      f"❌ No deals found (Z-score ≥ {self.Z_THRESHOLDS['minimum']} OR country-specific thresholds required)\n\n"
                       f"🗃️ 45-day rolling cache (optimized)\n"
                       f"⚡ ALWAYS updates cache - no skipping\n"
                       f"☁️ Persistent MongoDB Atlas storage\n"
