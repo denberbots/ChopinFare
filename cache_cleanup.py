@@ -108,7 +108,7 @@ def clean_cache():
         return False
 
 def main():
-    """Main function - check, clean if needed, verify"""
+    """Main function - check, clean automatically, verify"""
     
     print("🚀 MONGODB CACHE MANAGEMENT")
     print("=" * 60)
@@ -120,31 +120,26 @@ def main():
         print("\n🎉 Cache is already empty - no cleaning needed!")
         return
     
-    # Step 2: Ask user if they want to clean
+    # Step 2: Always clean the cache without prompting (for GitHub Actions)
     total_docs = sum(counts.values())
     print(f"\n📋 Found {total_docs} total documents in cache")
-    
-    response = input("\n❓ Do you want to clean the cache? (y/n): ").lower().strip()
-    
-    if response != 'y':
-        print("⏭️ Skipping cache cleaning")
-        return
+    print("🧹 Automatically cleaning cache...")
     
     # Step 3: Clean the cache
-    if clean_cache():
-        print("\n🔄 Verifying cache was cleaned...")
-        
-        # Step 4: Verify cleaning worked
-        is_empty_after, counts_after = check_cache_status()
-        
-        if is_empty_after:
-            print("\n🎉 SUCCESS! Cache has been completely cleaned!")
-            print("✅ Your bot will now collect fresh data on next run")
-        else:
-            print("\n⚠️ WARNING: Some data may still remain")
-            print("📋 You may need to run the cleaning script again")
-    else:
+    if not clean_cache():
         print("\n❌ Cache cleaning failed!")
+        return
+    
+    # Step 4: Verify cleaning worked
+    print("\n🔄 Verifying cache was cleaned...")
+    is_empty_after, counts_after = check_cache_status()
+    
+    if is_empty_after:
+        print("\n🎉 SUCCESS! Cache has been completely cleaned!")
+        print("✅ Your bot will now collect fresh data on next run")
+    else:
+        print("\n⚠️ WARNING: Some data may still remain")
+        print("📋 You may need to run the cleaning script again")
 
 if __name__ == "__main__":
     main()
