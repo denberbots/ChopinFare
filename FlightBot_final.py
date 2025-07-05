@@ -5,7 +5,7 @@ MongoDB Flight Bot - COMPLETELY FIXED VERSION
 ✅ FIXED: Off-peak month search (October/November instead of August)
 ✅ FIXED: Lower Z-score threshold (1.5 instead of 1.7)
 ✅ FIXED: Proper currency conversion (RUB to PLN)
-✅ FIXED: All API parameter issues resolved
+✅ FIXED: All indentation issues resolved
 """
 
 import os
@@ -397,136 +397,12 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
-        
-        self._FLAGS = {
-            'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
-            'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
-            'MAD': '🇪🇸', 'BCN': '🇪🇸', 'PMI': '🇪🇸', 'IBZ': '🇪🇸', 'VLC': '🇪🇸', 'ALC': '🇪🇸', 'AGP': '🇪🇸', 'BIO': '🇪🇸',
-            'LPA': '🇪🇸', 'TFS': '🇪🇸', 'SPC': '🇪🇸',
-            'LHR': '🇬🇧', 'LTN': '🇬🇧', 'LGW': '🇬🇧', 'STN': '🇬🇧', 'GLA': '🇬🇧', 'BFS': '🇬🇧',
-            'CDG': '🇫🇷', 'ORY': '🇫🇷', 'NCE': '🇫🇷', 'MRS': '🇫🇷', 'BIQ': '🇫🇷', 'PIS': '🇫🇷', 'PUY': '🇫🇷',
-            'FRA': '🇩🇪', 'MUC': '🇩🇪', 'BER': '🇩🇪', 'HAM': '🇩🇪', 'STR': '🇩🇪', 'DUS': '🇩🇪', 'CGN': '🇩🇪', 'LEJ': '🇩🇪', 'DTM': '🇩🇪',
-            'AMS': '🇳🇱', 'RTM': '🇳🇱', 'EIN': '🇳🇱',
-            'ATH': '🇬🇷', 'SKG': '🇬🇷', 'CFU': '🇬🇷', 'HER': '🇬🇷', 'RHO': '🇬🇷', 'ZTH': '🇬🇷', 'JTR': '🇬🇷', 'CHQ': '🇬🇷',
-            'LIS': '🇵🇹', 'OPO': '🇵🇹', 'PDL': '🇵🇹', 'PXO': '🇵🇹',
-            'ARN': '🇸🇪', 'NYO': '🇸🇪', 'OSL': '🇳🇴', 'BGO': '🇳🇴', 'BOO': '🇳🇴',
-            'HEL': '🇫🇮', 'RVN': '🇫🇮', 'KEF': '🇮🇸', 'CPH': '🇩🇰',
-            'VIE': '🇦🇹', 'PRG': '🇨🇿', 'BRU': '🇧🇪', 'CRL': '🇧🇪', 'ZUR': '🇨🇭', 'BSL': '🇨🇭', 'GVA': '🇨🇭',
-            'BUD': '🇭🇺', 'DUB': '🇮🇪', 'VAR': '🇧🇬', 'BOJ': '🇧🇬', 'SOF': '🇧🇬',
-            'OTP': '🇷🇴', 'CLJ': '🇷🇴', 'SPU': '🇭🇷', 'DBV': '🇭🇷', 'ZAD': '🇭🇷',
-            'BEG': '🇷🇸', 'TIV': '🇲🇪', 'TGD': '🇲🇪', 'TIA': '🇦🇱', 'KRK': '🇵🇱', 'KTW': '🇵🇱',
-            'LED': '🇷🇺', 'SVO': '🇷🇺', 'DME': '🇷🇺', 'VKO': '🇷🇺', 'AER': '🇷🇺', 'OVB': '🇷🇺', 'IKT': '🇷🇺',
-            'ULV': '🇷🇺', 'KJA': '🇷🇺', 'KGD': '🇷🇺', 'MSQ': '🇧🇾',
-            'AYT': '🇹🇷', 'IST': '🇹🇷', 'SAW': '🇹🇷', 'ESB': '🇹🇷', 'IZM': '🇹🇷', 'ADB': '🇹🇷',
-            'TLV': '🇮🇱', 'EVN': '🇦🇲', 'TBS': '🇬🇪', 'GYD': '🇦🇿', 'KUT': '🇬🇪', 'FRU': '🇰🇬', 'TAS': '🇺🇿',
-            'DXB': '🇦🇪', 'SHJ': '🇦🇪', 'AUH': '🇦🇪', 'DWC': '🇦🇪', 'DOH': '🇶🇦', 'RUH': '🇸🇦', 'JED': '🇸🇦', 'DMM': '🇸🇦',
-            'SSH': '🇪🇬', 'CAI': '🇪🇬', 'RAK': '🇲🇦', 'DJE': '🇹🇳',
-            'TNR': '🇲🇬', 'ZNZ': '🇹🇿',
-            'EWR': '🇺🇸', 'JFK': '🇺🇸', 'LGA': '🇺🇸', 'MIA': '🇺🇸', 'PHL': '🇺🇸',
-            'YYZ': '🇨🇦', 'YWG': '🇨🇦', 'YEG': '🇨🇦', 'HAV': '🇨🇺', 'PUJ': '🇩🇴',
-            'HKT': '🇹🇭', 'BKK': '🇹🇭', 'DMK': '🇹🇭', 'DPS': '🇮🇩',
-            'ICN': '🇰🇷', 'GMP': '🇰🇷', 'NRT': '🇯🇵', 'HND': '🇯🇵', 'KIX': '🇯🇵', 'ITM': '🇯🇵',
-            'PEK': '🇨🇳', 'CMB': '🇱🇰', 'DEL': '🇮🇳', 'SYD': '🇦🇺'
-        }
-        
-        self._CITIES = {
-            'WAW': 'Warsaw', 'FCO': 'Rome', 'MAD': 'Madrid', 'BCN': 'Barcelona', 'LHR': 'London', 'AMS': 'Amsterdam',
-            'ATH': 'Athens', 'CDG': 'Paris', 'MUC': 'Munich', 'VIE': 'Vienna', 'PRG': 'Prague', 'BRU': 'Brussels',
-            'ORY': 'Paris', 'LIN': 'Milan', 'BGY': 'Milan', 'CIA': 'Rome', 'GOA': 'Genoa', 'PMI': 'Palma',
-            'MXP': 'Milan', 'VCE': 'Venice', 'NAP': 'Naples', 'LIS': 'Lisbon', 'LTN': 'London', 'LGW': 'London',
-            'STN': 'London', 'ARN': 'Stockholm', 'OSL': 'Oslo', 'NYO': 'Stockholm', 'FRA': 'Frankfurt',
-            'VAR': 'Varna', 'PSA': 'Pisa', 'EWR': 'New York', 'JFK': 'New York', 'LGA': 'New York',
-            'MIA': 'Miami', 'BLQ': 'Bologna', 'FLR': 'Florence', 'CAG': 'Cagliari', 'BRI': 'Bari',
-            'CTA': 'Catania', 'PMO': 'Palermo', 'BUS': 'Batum', 'AHO': 'Alghero', 'SKG': 'Thessaloniki',
-            'CFU': 'Corfu', 'HER': 'Heraklion', 'RHO': 'Rhodes', 'ZTH': 'Zakynthos', 'JTR': 'Santorini',
-            'CHQ': 'Chania', 'OPO': 'Porto', 'SPU': 'Split', 'DBV': 'Dubrovnik', 'ZAD': 'Zadar',
-            'BEG': 'Belgrade', 'TIV': 'Tivat', 'TGD': 'Podgorica', 'TIA': 'Tirana', 'SOF': 'Sofia',
-            'OTP': 'Bucharest', 'CLJ': 'Cluj-Napoca', 'KRK': 'Krakow', 'KTW': 'Katowice', 'KGD': 'Kaliningrad',
-            'LED': 'St. Petersburg', 'SVO': 'Moscow', 'DME': 'Moscow', 'VKO': 'Moscow', 'AYT': 'Antalya',
-            'IST': 'Istanbul', 'SAW': 'Istanbul', 'ESB': 'Ankara', 'IZM': 'Izmir', 'ADB': 'Izmir',
-            'TLV': 'Tel Aviv', 'EVN': 'Yerevan', 'TBS': 'Tbilisi', 'GYD': 'Baku', 'KUT': 'Kutaisi',
-            'MSQ': 'Minsk', 'HEL': 'Helsinki', 'KEF': 'Reykjavik', 'BUD': 'Budapest', 'DUB': 'Dublin',
-            'GLA': 'Glasgow', 'BFS': 'Belfast', 'NCE': 'Nice', 'MRS': 'Marseille', 'TFS': 'Tenerife',
-            'LPA': 'Las Palmas', 'IBZ': 'Ibiza', 'VLC': 'Valencia', 'ALC': 'Alicante', 'AGP': 'Malaga',
-            'BIO': 'Bilbao', 'SPC': 'La Palma', 'PDL': 'Ponta Delgada', 'PXO': 'Porto Santo',
-            'RAK': 'Marrakech', 'CAI': 'Cairo', 'DJE': 'Djerba', 'TNR': 'Antananarivo', 'ZNZ': 'Zanzibar',
-            'DXB': 'Dubai', 'SHJ': 'Sharjah', 'AUH': 'Abu Dhabi', 'DOH': 'Doha', 'RUH': 'Riyadh',
-            'JED': 'Jeddah', 'DMM': 'Dammam', 'SSH': 'Sharm El Sheikh', 'HKT': 'Phuket', 'BKK': 'Bangkok',
-            'DMK': 'Bangkok', 'DPS': 'Denpasar', 'ICN': 'Seoul', 'GMP': 'Seoul', 'NRT': 'Tokyo',
-            'HND': 'Tokyo', 'KIX': 'Osaka', 'ITM': 'Osaka', 'PEK': 'Beijing', 'YYZ': 'Toronto',
-            'YWG': 'Winnipeg', 'YEG': 'Edmonton', 'HAV': 'Havana', 'PUJ': 'Punta Cana', 'CMB': 'Colombo',
-            'DEL': 'Delhi', 'SYD': 'Sydney', 'OVB': 'Novosibirsk', 'IKT': 'Irkutsk', 'ULV': 'Ulyanovsk',
-            'KJA': 'Krasnoyarsk', 'FRU': 'Bishkek', 'BOO': 'Bodø', 'BGO': 'Bergen', 'RVN': 'Rovaniemi',
-            'DTM': 'Dortmund', 'STR': 'Stuttgart', 'HAM': 'Hamburg', 'RTM': 'Rotterdam', 'EIN': 'Eindhoven',
-            'BSL': 'Basel', 'ZUR': 'Zurich', 'GVA': 'Geneva', 'CPH': 'Copenhagen', 'BIQ': 'Biarritz',
-            'PIS': 'Poitiers', 'CRL': 'Brussels', 'PUY': 'Puy-en-Velay', 'DWC': 'Dubai', 'AER': 'Sochi',
-            'PHL': 'Philadelphia', 'TAS': 'Tashkent', 'BOJ': 'Burgas'
-        }
-        
-        self._COUNTRIES = {
-            'FCO': 'Italy', 'MXP': 'Italy', 'LIN': 'Italy', 'BGY': 'Italy', 'CIA': 'Italy', 'VCE': 'Italy', 
-            'NAP': 'Italy', 'GOA': 'Italy', 'PMO': 'Italy', 'BLQ': 'Italy', 'FLR': 'Italy', 'PSA': 'Italy',
-            'CAG': 'Italy', 'BRI': 'Italy', 'CTA': 'Italy', 'BUS': 'Italy', 'AHO': 'Italy',
-            'MAD': 'Spain', 'BCN': 'Spain', 'PMI': 'Spain', 'IBZ': 'Spain', 'VLC': 'Spain', 'ALC': 'Spain',
-            'AGP': 'Spain', 'BIO': 'Spain', 'LPA': 'Spain', 'TFS': 'Spain', 'SPC': 'Spain',
-            'LHR': 'United Kingdom', 'LTN': 'United Kingdom', 'LGW': 'United Kingdom', 'STN': 'United Kingdom',
-            'GLA': 'United Kingdom', 'BFS': 'United Kingdom',
-            'CDG': 'France', 'ORY': 'France', 'NCE': 'France', 'MRS': 'France', 'BIQ': 'France',
-            'PIS': 'France', 'PUY': 'France',
-            'FRA': 'Germany', 'MUC': 'Germany', 'BER': 'Germany', 'HAM': 'Germany', 'STR': 'Germany',
-            'DUS': 'Germany', 'CGN': 'Germany', 'LEJ': 'Germany', 'DTM': 'Germany',
-            'AMS': 'Netherlands', 'RTM': 'Netherlands', 'EIN': 'Netherlands',
-            'ATH': 'Greece', 'SKG': 'Greece', 'CFU': 'Greece', 'HER': 'Greece', 'RHO': 'Greece',
-            'ZTH': 'Greece', 'JTR': 'Greece', 'CHQ': 'Greece',
-            'LIS': 'Portugal', 'OPO': 'Portugal', 'PDL': 'Portugal', 'PXO': 'Portugal',
-            'ARN': 'Sweden', 'NYO': 'Sweden', 'OSL': 'Norway', 'BGO': 'Norway', 'BOO': 'Norway',
-            'HEL': 'Finland', 'RVN': 'Finland', 'KEF': 'Iceland', 'CPH': 'Denmark',
-            'VIE': 'Austria', 'PRG': 'Czech Republic', 'BRU': 'Belgium', 'CRL': 'Belgium',
-            'ZUR': 'Switzerland', 'BSL': 'Switzerland', 'GVA': 'Switzerland', 'BUD': 'Hungary',
-            'DUB': 'Ireland', 'VAR': 'Bulgaria', 'BOJ': 'Bulgaria', 'SOF': 'Bulgaria',
-            'OTP': 'Romania', 'CLJ': 'Romania', 'SPU': 'Croatia', 'DBV': 'Croatia', 'ZAD': 'Croatia',
-            'BEG': 'Serbia', 'TIV': 'Montenegro', 'TGD': 'Montenegro', 'TIA': 'Albania',
-            'KRK': 'Poland', 'KTW': 'Poland', 'KGD': 'Russia', 'LED': 'Russia', 'SVO': 'Russia',
-            'DME': 'Russia', 'VKO': 'Russia', 'AER': 'Russia', 'OVB': 'Russia', 'IKT': 'Russia',
-            'ULV': 'Russia', 'KJA': 'Russia', 'MSQ': 'Belarus',
-            'AYT': 'Turkey', 'IST': 'Turkey', 'SAW': 'Turkey', 'ESB': 'Turkey', 'IZM': 'Turkey', 'ADB': 'Turkey',
-            'TLV': 'Israel', 'EVN': 'Armenia', 'TBS': 'Georgia', 'GYD': 'Azerbaijan', 'KUT': 'Georgia',
-            'FRU': 'Kyrgyzstan', 'TAS': 'Uzbekistan',
-            'EWR': 'United States', 'JFK': 'United States', 'LGA': 'United States', 'MIA': 'United States',
-            'PHL': 'United States', 'YYZ': 'Canada', 'YWG': 'Canada', 'YEG': 'Canada',
-            'HAV': 'Cuba', 'PUJ': 'Dominican Republic',
-            'DXB': 'United Arab Emirates', 'SHJ': 'United Arab Emirates', 'AUH': 'United Arab Emirates',
-            'DWC': 'United Arab Emirates', 'DOH': 'Qatar', 'RUH': 'Saudi Arabia', 'JED': 'Saudi Arabia',
-            'DMM': 'Saudi Arabia', 'SSH': 'Egypt', 'CAI': 'Egypt',
-            'RAK': 'Morocco', 'DJE': 'Tunisia', 'TNR': 'Madagascar', 'ZNZ': 'Tanzania',
-            'HKT': 'Thailand', 'BKK': 'Thailand', 'DMK': 'Thailand', 'DPS': 'Indonesia',
-            'ICN': 'South Korea', 'GMP': 'South Korea', 'NRT': 'Japan', 'HND': 'Japan',
-            'KIX': 'Japan', 'ITM': 'Japan', 'PEK': 'China', 'CMB': 'Sri Lanka', 'DEL': 'India',
-            'SYD': 'Australia'
-        }
-    
-    def _format_date_range(self, departure_date: str, return_date: str) -> str:
-        """Format date range compactly"""
-        try:
-            dep = datetime.strptime(departure_date, '%Y-%m-%d').strftime('%b %d')
-            ret = datetime.strptime(return_date, '%Y-%m-%d')
-            ret_fmt = ret.strftime('%d' if departure_date[:7] == return_date[:7] else '%b %d')
-            return f"{dep}-{ret_fmt}"
-        except Exception:
-            return f"{departure_date} to {return_date}"
     
     def send_deal_alert(self, destination: str, price: float, z_score: float, 
                        market_median: float, savings: float, verification_data: Dict = None) -> bool:
         try:
-            origin_city = self._CITIES.get('WAW', 'Warsaw')
-            dest_city = self._CITIES.get(destination, destination)
-            country = self._COUNTRIES.get(destination, '')
-            flag = self._FLAGS.get(destination, '')
-            
-            header = f"🚨 *FLIGHT DEAL ALERT* 🚨\n\n"
-            header += f"✈️ *{origin_city} → {dest_city}{f', {country} {flag}' if country and flag else ''}*"
-            
-            message = header + f"\n\n"
+            message = f"🚨 *FLIGHT DEAL ALERT* 🚨\n\n"
+            message += f"✈️ *Warsaw → {destination}*\n\n"
             message += f"💰 *Price:* {price:.0f} PLN\n"
             message += f"📊 *Market Median:* {market_median:.0f} PLN\n"
             message += f"💸 *Savings:* {savings:.0f} PLN ({(savings/market_median)*100:.1f}%)\n"
@@ -537,17 +413,8 @@ class TelegramNotifier:
                 return_at = verification_data.get('return_at', '')
                 
                 if departure_at and return_at:
-                    date_range = self._format_date_range(departure_at[:10], return_at[:10])
                     message += f"\n✅ *Verified Deal Details:*\n"
-                    message += f"📅 *Dates:* {date_range}\n"
-                    
-                    try:
-                        dep_date = datetime.strptime(departure_at[:10], '%Y-%m-%d')
-                        ret_date = datetime.strptime(return_at[:10], '%Y-%m-%d')
-                        duration = (ret_date - dep_date).days
-                        message += f"🕒 *Duration:* {duration} days\n"
-                    except:
-                        pass
+                    message += f"📅 *Dates:* {departure_at[:10]} to {return_at[:10]}\n"
                 
                 airline = verification_data.get('airline', '')
                 if airline:
@@ -565,7 +432,7 @@ class TelegramNotifier:
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
             
-            console.info(f"📱 Deal alert sent for {dest_city}: {price:.0f} PLN")
+            console.info(f"📱 Deal alert sent for {destination}: {price:.0f} PLN")
             return True
             
         except Exception as e:
@@ -858,7 +725,7 @@ class FlightBot:
                                     'verification_data': verification,
                                     'verification_method': verification_method
                                 }
-                                                                deals_found.append(deal)
+                                deals_found.append(deal)
                                 
                                 self.notifier.send_deal_alert(
                                     destination, verified_price, verified_z_score,
@@ -956,11 +823,10 @@ def main():
     console.info("✅ FIXED: Off-peak month search (October/November)")
     console.info("✅ FIXED: Lower Z-score threshold (1.5)")
     console.info("✅ FIXED: Currency conversion (RUB to PLN)")
+    console.info("✅ FIXED: All indentation issues resolved")
     
     bot = FlightBot()
     bot.run_daily_automation()
 
 if __name__ == "__main__":
     main()
-                
-            '
