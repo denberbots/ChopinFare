@@ -1,4 +1,334 @@
-console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
+#!/usr/bin/env python3
+"""
+MongoDB Flight Bot - Complete Production Version
+✅ Updated with PERCENTILE-based deal detection (replaces Z-score)
+✅ Country-specific absolute thresholds + robust percentile filtering
+✅ Combined deal logic: Percentile-based OR price < absolute threshold
+✅ Smart deduplication - max 1 deal per destination per run
+✅ MongoDB 45-day cache with always-update logic
+✅ All 150+ destinations properly mapped with flags/countries
+✅ Robust to outliers and corrupted cache data
+
+PERCENTILE SYSTEM: Top 5%, 10%, 20%, 25% deals + absolute thresholds
+Ready for GitHub Actions deployment - just copy, paste, and commit!
+"""
+
+import requests
+import time
+import logging
+import statistics
+import math
+import os
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
+
+# Logging configuration
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('flight_bot.log', encoding='utf-8'), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+console = logging.getLogger('console')
+console.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(message)s'))
+console.addHandler(console_handler)
+console.propagate = False
+
+@dataclass
+class MatrixEntry:
+    """Flight data entry from API"""
+    date: str
+    price: float
+    transfers: int
+    airline: str
+
+@dataclass
+class RoundTripCandidate:
+    """Round-trip combination before verification"""
+    destination: str
+    outbound_date: str
+    return_date: str
+    total_price: float
+    duration_days: int
+    outbound_transfers: int
+    return_transfers: int
+    outbound_airline: str
+    return_airline: str
+    estimated_savings_percent: float = 0.0
+
+@dataclass
+class VerifiedDeal:
+    """Verified flight deal"""
+    destination: str
+    departure_month: str
+    return_month: str
+    price: float
+    departure_at: str
+    return_at: str
+    duration_total: int
+    outbound_stops: int
+    return_stops: int
+    airline: str
+    booking_link: str
+    deal_type: str
+    median_price: float
+    savings_percent: float
+    trip_duration_days: int
+    z_score: float = 0.0
+    percentile: float = 0.0
+    outbound_flight_number: str = ""
+    return_flight_number: str = ""
+    outbound_duration: int = 0
+    return_duration: int = 0
+    
+    # COMPLETE mappings - FIXED Lisbon and all formatting issues
+    _FLAGS = {
+        'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
+        'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
+        'MAD': '🇪🇸', 'BCN': '🇪🇸', 'PMI': '🇪🇸', 'IBZ': '🇪🇸', 'VLC': '🇪🇸', 'ALC': '🇪🇸', 'AGP': '🇪🇸', 'BIO': '🇪🇸',
+        'LPA': '🇪🇸', 'TFS': '🇪🇸', 'SPC': '🇪🇸', 'MAH': '🇪🇸',
+        'LHR': '🇬🇧', 'LTN': '🇬🇧', 'LGW': '🇬🇧', 'STN': '🇬🇧', 'GLA': '🇬🇧', 'BFS': '🇬🇧',
+        'CDG': '🇫🇷', 'ORY': '🇫🇷', 'NCE': '🇫🇷', 'MRS': '🇫🇷', 'BIQ': '🇫🇷', 'PIS': '🇫🇷', 'PUY': '🇫🇷',
+        'FRA': '🇩🇪', 'MUC': '🇩🇪', 'BER': '🇩🇪', 'HAM': '🇩🇪', 'STR': '🇩🇪', 'DUS': '🇩🇪', 'CGN': '🇩🇪', 'LEJ': '🇩🇪', 'DTM': '🇩🇪',
+        'AMS': '🇳🇱', 'RTM': '🇳🇱', 'EIN': '🇳🇱',
+        'ATH': '🇬🇷', 'SKG': '🇬🇷', 'CFU': '🇬🇷', 'HER': '🇬🇷', 'RHO': '🇬🇷', 'ZTH': '🇬🇷', 'JTR': '🇬🇷', 'CHQ': '🇬🇷',
+        'LIS': '🇵🇹', 'OPO': '🇵🇹', 'PDL': '🇵🇹', 'PXO': '🇵🇹',  # Portugal - FIXED: LIS included
+        'ARN': '🇸🇪', 'NYO': '🇸🇪', 'OSL': '🇳🇴', 'BGO': '🇳🇴', 'BOO': '🇳🇴',  # Scandinavia
+        'HEL': '🇫🇮', 'RVN': '🇫🇮', 'KEF': '🇮🇸', 'CPH': '🇩🇰',  # Nordic
+        'VIE': '🇦🇹', 'PRG': '🇨🇿', 'BRU': '🇧🇪', 'CRL': '🇧🇪', 'ZUR': '🇨🇭', 'BSL': '🇨🇭', 'GVA': '🇨🇭',  # Central Europe
+        'BUD': '🇭🇺', 'DUB': '🇮🇪', 'VAR': '🇧🇬', 'BOJ': '🇧🇬', 'SOF': '🇧🇬',  # Eastern Europe
+        'OTP': '🇷🇴', 'CLJ': '🇷🇴', 'SPU': '🇭🇷', 'DBV': '🇭🇷', 'ZAD': '🇭🇷',  # Balkans
+        'BEG': '🇷🇸', 'TIV': '🇲🇪', 'TGD': '🇲🇪', 'TIA': '🇦🇱', 'KRK': '🇵🇱', 'KTW': '🇵🇱',  # Balkans/Poland
+        'LED': '🇷🇺', 'SVO': '🇷🇺', 'DME': '🇷🇺', 'VKO': '🇷🇺', 'AER': '🇷🇺', 'OVB': '🇷🇺', 'IKT': '🇷🇺',  # Russia
+        'ULV': '🇷🇺', 'KJA': '🇷🇺', 'KGD': '🇷🇺', 'MSQ': '🇧🇾',  # Russia/Belarus
+        'AYT': '🇹🇷', 'IST': '🇹🇷', 'SAW': '🇹🇷', 'ESB': '🇹🇷', 'IZM': '🇹🇷', 'ADB': '🇹🇷',  # Turkey
+        'TLV': '🇮🇱', 'EVN': '🇦🇲', 'TBS': '🇬🇪', 'GYD': '🇦🇿', 'KUT': '🇬🇪', 'FRU': '🇰🇬', 'TAS': '🇺🇿',  # Middle East/Central Asia
+        'DXB': '🇦🇪', 'SHJ': '🇦🇪', 'AUH': '🇦🇪', 'DWC': '🇦🇪', 'DOH': '🇶🇦', 'RUH': '🇸🇦', 'JED': '🇸🇦', 'DMM': '🇸🇦',  # Gulf
+        'SSH': '🇪🇬', 'CAI': '🇪🇬', 'RAK': '🇲🇦', 'DJE': '🇹🇳',  # North Africa
+        'TNR': '🇲🇬', 'ZNZ': '🇹🇿',  # East Africa
+        'EWR': '🇺🇸', 'JFK': '🇺🇸', 'LGA': '🇺🇸', 'MIA': '🇺🇸', 'PHL': '🇺🇸',  # USA
+        'YYZ': '🇨🇦', 'YWG': '🇨🇦', 'YEG': '🇨🇦', 'HAV': '🇨🇺', 'PUJ': '🇩🇴',  # Americas
+        'HKT': '🇹🇭', 'BKK': '🇹🇭', 'DMK': '🇹🇭', 'DPS': '🇮🇩',  # Southeast Asia
+        'ICN': '🇰🇷', 'GMP': '🇰🇷', 'NRT': '🇯🇵', 'HND': '🇯🇵', 'KIX': '🇯🇵', 'ITM': '🇯🇵',  # East Asia
+        'PEK': '🇨🇳', 'CMB': '🇱🇰', 'DEL': '🇮🇳', 'SYD': '🇦🇺'  # Asia/Oceania
+    }
+    
+    _CITIES = {
+        'WAW': 'Warsaw', 'FCO': 'Rome', 'MAD': 'Madrid', 'BCN': 'Barcelona', 'LHR': 'London', 'AMS': 'Amsterdam',
+        'ATH': 'Athens', 'CDG': 'Paris', 'MUC': 'Munich', 'VIE': 'Vienna', 'PRG': 'Prague', 'BRU': 'Brussels',
+        'ORY': 'Paris', 'LIN': 'Milan', 'BGY': 'Milan', 'CIA': 'Rome', 'GOA': 'Genoa', 'PMI': 'Palma',
+        'MXP': 'Milan', 'VCE': 'Venice', 'NAP': 'Naples', 'LIS': 'Lisbon', 'LTN': 'London', 'LGW': 'London',  # FIXED: LIS added
+        'STN': 'London', 'ARN': 'Stockholm', 'OSL': 'Oslo', 'NYO': 'Stockholm', 'FRA': 'Frankfurt',
+        'VAR': 'Varna', 'PSA': 'Pisa', 'EWR': 'New York', 'JFK': 'New York', 'LGA': 'New York',
+        'MIA': 'Miami', 'BLQ': 'Bologna', 'FLR': 'Florence', 'CAG': 'Cagliari', 'BRI': 'Bari',
+        'CTA': 'Catania', 'PMO': 'Palermo', 'BUS': 'Batum', 'AHO': 'Alghero', 'SKG': 'Thessaloniki',
+        'CFU': 'Corfu', 'HER': 'Heraklion', 'RHO': 'Rhodes', 'ZTH': 'Zakynthos', 'JTR': 'Santorini',
+        'CHQ': 'Chania', 'OPO': 'Porto', 'SPU': 'Split', 'DBV': 'Dubrovnik', 'ZAD': 'Zadar',
+        'BEG': 'Belgrade', 'TIV': 'Tivat', 'TGD': 'Podgorica', 'TIA': 'Tirana', 'SOF': 'Sofia',
+        'OTP': 'Bucharest', 'CLJ': 'Cluj-Napoca', 'KRK': 'Krakow', 'KTW': 'Katowice', 'KGD': 'Kaliningrad',
+        'LED': 'St. Petersburg', 'SVO': 'Moscow', 'DME': 'Moscow', 'VKO': 'Moscow', 'AYT': 'Antalya',
+        'IST': 'Istanbul', 'SAW': 'Istanbul', 'ESB': 'Ankara', 'IZM': 'Izmir', 'ADB': 'Izmir',
+        'TLV': 'Tel Aviv', 'EVN': 'Yerevan', 'TBS': 'Tbilisi', 'GYD': 'Baku', 'KUT': 'Kutaisi',
+        'MSQ': 'Minsk', 'HEL': 'Helsinki', 'KEF': 'Reykjavik', 'BUD': 'Budapest', 'DUB': 'Dublin',
+        'GLA': 'Glasgow', 'BFS': 'Belfast', 'NCE': 'Nice', 'MRS': 'Marseille', 'TFS': 'Tenerife',
+        'LPA': 'Las Palmas', 'IBZ': 'Ibiza', 'VLC': 'Valencia', 'ALC': 'Alicante', 'AGP': 'Malaga',
+        'BIO': 'Bilbao', 'SPC': 'La Palma', 'PDL': 'Ponta Delgada', 'PXO': 'Porto Santo',
+        'RAK': 'Marrakech', 'CAI': 'Cairo', 'DJE': 'Djerba', 'TNR': 'Antananarivo', 'ZNZ': 'Zanzibar',
+        'DXB': 'Dubai', 'SHJ': 'Sharjah', 'AUH': 'Abu Dhabi', 'DOH': 'Doha', 'RUH': 'Riyadh',
+        'JED': 'Jeddah', 'DMM': 'Dammam', 'SSH': 'Sharm El Sheikh', 'HKT': 'Phuket', 'BKK': 'Bangkok',
+        'DMK': 'Bangkok', 'DPS': 'Denpasar', 'ICN': 'Seoul', 'GMP': 'Seoul', 'NRT': 'Tokyo',
+        'HND': 'Tokyo', 'KIX': 'Osaka', 'ITM': 'Osaka', 'PEK': 'Beijing', 'YYZ': 'Toronto',
+        'YWG': 'Winnipeg', 'YEG': 'Edmonton', 'HAV': 'Havana', 'PUJ': 'Punta Cana', 'CMB': 'Colombo',
+        'DEL': 'Delhi', 'SYD': 'Sydney', 'OVB': 'Novosibirsk', 'IKT': 'Irkutsk', 'ULV': 'Ulyanovsk',
+        'KJA': 'Krasnoyarsk', 'FRU': 'Bishkek', 'BOO': 'Bodø', 'BGO': 'Bergen', 'RVN': 'Rovaniemi',
+        'DTM': 'Dortmund', 'STR': 'Stuttgart', 'HAM': 'Hamburg', 'RTM': 'Rotterdam', 'EIN': 'Eindhoven',
+        'BSL': 'Basel', 'ZUR': 'Zurich', 'GVA': 'Geneva', 'CPH': 'Copenhagen', 'BIQ': 'Biarritz',
+        'PIS': 'Poitiers', 'CRL': 'Brussels', 'PUY': 'Puy-en-Velay', 'DWC': 'Dubai', 'AER': 'Sochi',
+        'PHL': 'Philadelphia', 'TAS': 'Tashkent', 'BOJ': 'Burgas'
+    }
+    
+    _COUNTRIES = {
+        'FCO': 'Italy', 'MXP': 'Italy', 'LIN': 'Italy', 'BGY': 'Italy', 'CIA': 'Italy', 'VCE': 'Italy', 
+        'NAP': 'Italy', 'GOA': 'Italy', 'PMO': 'Italy', 'BLQ': 'Italy', 'FLR': 'Italy', 'PSA': 'Italy',
+        'CAG': 'Italy', 'BRI': 'Italy', 'CTA': 'Italy', 'BUS': 'Italy', 'AHO': 'Italy',
+        'MAD': 'Spain', 'BCN': 'Spain', 'PMI': 'Spain', 'IBZ': 'Spain', 'VLC': 'Spain', 'ALC': 'Spain',
+        'AGP': 'Spain', 'BIO': 'Spain', 'LPA': 'Spain', 'TFS': 'Spain', 'SPC': 'Spain',
+        'LHR': 'United Kingdom', 'LTN': 'United Kingdom', 'LGW': 'United Kingdom', 'STN': 'United Kingdom',
+        'GLA': 'United Kingdom', 'BFS': 'United Kingdom',
+        'CDG': 'France', 'ORY': 'France', 'NCE': 'France', 'MRS': 'France', 'BIQ': 'France',
+        'PIS': 'France', 'PUY': 'France',
+        'FRA': 'Germany', 'MUC': 'Germany', 'BER': 'Germany', 'HAM': 'Germany', 'STR': 'Germany',
+        'DUS': 'Germany', 'CGN': 'Germany', 'LEJ': 'Germany', 'DTM': 'Germany',
+        'AMS': 'Netherlands', 'RTM': 'Netherlands', 'EIN': 'Netherlands',
+        'ATH': 'Greece', 'SKG': 'Greece', 'CFU': 'Greece', 'HER': 'Greece', 'RHO': 'Greece',
+        'ZTH': 'Greece', 'JTR': 'Greece', 'CHQ': 'Greece',
+        'LIS': 'Portugal', 'OPO': 'Portugal', 'PDL': 'Portugal', 'PXO': 'Portugal',  # FIXED: LIS included
+        'ARN': 'Sweden', 'NYO': 'Sweden', 'OSL': 'Norway', 'BGO': 'Norway', 'BOO': 'Norway',
+        'HEL': 'Finland', 'RVN': 'Finland', 'KEF': 'Iceland', 'CPH': 'Denmark',
+        'VIE': 'Austria', 'PRG': 'Czech Republic', 'BRU': 'Belgium', 'CRL': 'Belgium',
+        'ZUR': 'Switzerland', 'BSL': 'Switzerland', 'GVA': 'Switzerland', 'BUD': 'Hungary',
+        'DUB': 'Ireland', 'VAR': 'Bulgaria', 'BOJ': 'Bulgaria', 'SOF': 'Bulgaria',
+        'OTP': 'Romania', 'CLJ': 'Romania', 'SPU': 'Croatia', 'DBV': 'Croatia', 'ZAD': 'Croatia',
+        'BEG': 'Serbia', 'TIV': 'Montenegro', 'TGD': 'Montenegro', 'TIA': 'Albania',
+        'KRK': 'Poland', 'KTW': 'Poland', 'KGD': 'Russia', 'LED': 'Russia', 'SVO': 'Russia',
+        'DME': 'Russia', 'VKO': 'Russia', 'AER': 'Russia', 'OVB': 'Russia', 'IKT': 'Russia',
+        'ULV': 'Russia', 'KJA': 'Russia', 'MSQ': 'Belarus',
+        'AYT': 'Turkey', 'IST': 'Turkey', 'SAW': 'Turkey', 'ESB': 'Turkey', 'IZM': 'Turkey', 'ADB': 'Turkey',
+        'TLV': 'Israel', 'EVN': 'Armenia', 'TBS': 'Georgia', 'GYD': 'Azerbaijan', 'KUT': 'Georgia',
+        'FRU': 'Kyrgyzstan', 'TAS': 'Uzbekistan',
+        'EWR': 'United States', 'JFK': 'United States', 'LGA': 'United States', 'MIA': 'United States',
+        'PHL': 'United States', 'YYZ': 'Canada', 'YWG': 'Canada', 'YEG': 'Canada',
+        'HAV': 'Cuba', 'PUJ': 'Dominican Republic',
+        'DXB': 'United Arab Emirates', 'SHJ': 'United Arab Emirates', 'AUH': 'United Arab Emirates',
+        'DWC': 'United Arab Emirates', 'DOH': 'Qatar', 'RUH': 'Saudi Arabia', 'JED': 'Saudi Arabia',
+        'DMM': 'Saudi Arabia', 'SSH': 'Egypt', 'CAI': 'Egypt',
+        'RAK': 'Morocco', 'DJE': 'Tunisia', 'TNR': 'Madagascar', 'ZNZ': 'Tanzania',
+        'HKT': 'Thailand', 'BKK': 'Thailand', 'DMK': 'Thailand', 'DPS': 'Indonesia',
+        'ICN': 'South Korea', 'GMP': 'South Korea', 'NRT': 'Japan', 'HND': 'Japan',
+        'KIX': 'Japan', 'ITM': 'Japan', 'PEK': 'China', 'CMB': 'Sri Lanka', 'DEL': 'India',
+        'SYD': 'Australia'
+    }
+    
+    def _format_date_range(self, departure_date: str, return_date: str) -> str:
+        """Format date range compactly"""
+        try:
+            dep = datetime.strptime(departure_date, '%Y-%m-%d').strftime('%b %d')
+            ret = datetime.strptime(return_date, '%Y-%m-%d')
+            ret_fmt = ret.strftime('%d' if departure_date[:7] == return_date[:7] else '%b %d')
+            return f"{dep}-{ret_fmt}"
+        except Exception:
+            return f"{departure_date}-{return_date}"
+    
+    def _format_flight_type(self) -> str:
+        """Format flight connections"""
+        out = "Direct" if self.outbound_stops == 0 else f"{self.outbound_stops} stop{'s' if self.outbound_stops > 1 else ''}"
+        ret = "Direct" if self.return_stops == 0 else f"{self.return_stops} stop{'s' if self.return_stops > 1 else ''}"
+        return "Direct flights" if out == ret == "Direct" else f"Out: {out}, Return: {ret}"
+    
+    def __str__(self):
+        origin = self._CITIES.get('WAW', 'Warsaw')
+        dest = self._CITIES.get(self.destination, self.destination)
+        country = self._COUNTRIES.get(self.destination, '')
+        flag = self._FLAGS.get(self.destination, '')
+        
+        header = f"*{origin} → {dest}{f', {country} {flag}' if country and flag else ''}: {self.price:.0f} zł*"
+        date_range = self._format_date_range(self.departure_at[:10], self.return_at[:10])
+        
+        return (f"{header}\n\n"
+                f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n"
+                f"📊 {self.savings_percent:.0f}% below typical ({self.median_price:.0f} zł)\n\n"
+                f"🔗 [Book Deal]({self.booking_link})")
+
+class MongoFlightCache:
+    """MongoDB-based flight cache with persistent 45-day rolling window - ALWAYS UPDATES"""
+    
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
+        self.client = None
+        self.db = None
+        self.CACHE_DAYS = 45  # 1.5 months (realistic for 512 MB MongoDB)
+        self._connect()
+    
+    def _connect(self):
+        """Connect to MongoDB Atlas"""
+        try:
+            console.info("🔗 Connecting to MongoDB Atlas...")
+            self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=10000)
+            # Test connection
+            self.client.admin.command('ping')
+            self.db = self.client['flight_bot_db']
+            console.info("✅ Connected to MongoDB Atlas successfully")
+        except ConnectionFailure as e:
+            console.info(f"❌ Failed to connect to MongoDB: {e}")
+            raise
+        except Exception as e:
+            console.info(f"❌ MongoDB connection error: {e}")
+            raise
+    
+    def cache_daily_data(self, api, destinations: List[str], months: List[str]):
+        """Cache daily flight data to MongoDB - ALWAYS PERFORMS FULL UPDATE"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
+        console.info(f"📅 Cache date: {today} (ALWAYS updates - no skipping)")
+        
+        # Remove today's data if any exists (ensures fresh daily data)
+        try:
+            deleted = self.db.flight_data.delete_many({'cached_date': today})
+            if deleted.deleted_count > 0:
+                console.info(f"🧹 Removed {deleted.deleted_count} existing entries for {today}")
+        except Exception as e:
+            console.info(f"⚠️ Error cleaning today's data: {e}")
+        
+        # Batch insert for better performance
+        all_entries = []
+        total_cached = 0
+        successful_destinations = 0
+        
+        for i, destination in enumerate(destinations, 1):
+            console.info(f"📥 [{i}/{len(destinations)}] Caching {destination}")
+            
+            try:
+                combinations = api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
+                
+                if combinations:
+                    for combo in combinations:
+                        all_entries.append({
+                            'destination': destination,
+                            'outbound_date': combo.outbound_date,
+                            'return_date': combo.return_date,
+                            'price': combo.total_price,
+                            'transfers_out': combo.outbound_transfers,
+                            'transfers_return': combo.return_transfers,
+                            'airline': combo.outbound_airline,
+                            'cached_date': today,
+                            'trip_duration': combo.duration_days
+                        })
+                    
+                    successful_destinations += 1
+                    console.info(f"  ✅ {destination}: Cached {len(combinations)} combinations")
+                else:
+                    console.info(f"  ⚠️ {destination}: No valid combinations found")
+                
+                # Batch insert every 1000 entries for memory efficiency
+                if len(all_entries) >= 1000:
+                    try:
+                        self.db.flight_data.insert_many(all_entries, ordered=False)
+                        total_cached += len(all_entries)
+                        all_entries.clear()
+                    except Exception as e:
+                        console.info(f"⚠️ Batch insert error: {e}")
+                        all_entries.clear()
+                
+                # Small delay to be nice to the API
+                if i % 10 == 0:
+                    time.sleep(1)
+                
+            except Exception as e:
+                console.info(f"  ❌ {destination}: Error - {e}")
+                logger.error(f"Cache error for {destination}: {e}")
+        
+        # Insert remaining entries
+        if all_entries:
+            try:
+                self.db.flight_data.insert_many(all_entries, ordered=False)
+                total_cached += len(all_entries)
+            except Exception as e:
+                console.info(f"⚠️ Final batch insert error: {e}")
+        
+        # Update statistics for all destinations that have data
+        self._update_all_destination_stats()
+        
+        # Clean up old data (keep 45-day window)
+        self._manage_rolling_window(today)
+        
+        console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
     
     def _update_all_destination_stats(self):
         """Update statistics for all destinations with sufficient data"""
@@ -919,334 +1249,4 @@ def main():
         bot.run()
 
 if __name__ == "__main__":
-    main()#!/usr/bin/env python3
-"""
-MongoDB Flight Bot - Complete Production Version
-✅ Updated with PERCENTILE-based deal detection (replaces Z-score)
-✅ Country-specific absolute thresholds + robust percentile filtering
-✅ Combined deal logic: Percentile-based OR price < absolute threshold
-✅ Smart deduplication - max 1 deal per destination per run
-✅ MongoDB 45-day cache with always-update logic
-✅ All 150+ destinations properly mapped with flags/countries
-✅ Robust to outliers and corrupted cache data
-
-PERCENTILE SYSTEM: Top 5%, 10%, 20%, 25% deals + absolute thresholds
-Ready for GitHub Actions deployment - just copy, paste, and commit!
-"""
-
-import requests
-import time
-import logging
-import statistics
-import math
-import os
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure
-
-# Logging configuration
-logging.basicConfig(
-    level=logging.WARNING,
-    format='%(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('flight_bot.log', encoding='utf-8'), logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
-
-console = logging.getLogger('console')
-console.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(message)s'))
-console.addHandler(console_handler)
-console.propagate = False
-
-@dataclass
-class MatrixEntry:
-    """Flight data entry from API"""
-    date: str
-    price: float
-    transfers: int
-    airline: str
-
-@dataclass
-class RoundTripCandidate:
-    """Round-trip combination before verification"""
-    destination: str
-    outbound_date: str
-    return_date: str
-    total_price: float
-    duration_days: int
-    outbound_transfers: int
-    return_transfers: int
-    outbound_airline: str
-    return_airline: str
-    estimated_savings_percent: float = 0.0
-
-@dataclass
-class VerifiedDeal:
-    """Verified flight deal"""
-    destination: str
-    departure_month: str
-    return_month: str
-    price: float
-    departure_at: str
-    return_at: str
-    duration_total: int
-    outbound_stops: int
-    return_stops: int
-    airline: str
-    booking_link: str
-    deal_type: str
-    median_price: float
-    savings_percent: float
-    trip_duration_days: int
-    z_score: float = 0.0
-    percentile: float = 0.0
-    outbound_flight_number: str = ""
-    return_flight_number: str = ""
-    outbound_duration: int = 0
-    return_duration: int = 0
-    
-    # COMPLETE mappings - FIXED Lisbon and all formatting issues
-    _FLAGS = {
-        'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
-        'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
-        'MAD': '🇪🇸', 'BCN': '🇪🇸', 'PMI': '🇪🇸', 'IBZ': '🇪🇸', 'VLC': '🇪🇸', 'ALC': '🇪🇸', 'AGP': '🇪🇸', 'BIO': '🇪🇸',
-        'LPA': '🇪🇸', 'TFS': '🇪🇸', 'SPC': '🇪🇸', 'MAH': '🇪🇸',
-        'LHR': '🇬🇧', 'LTN': '🇬🇧', 'LGW': '🇬🇧', 'STN': '🇬🇧', 'GLA': '🇬🇧', 'BFS': '🇬🇧',
-        'CDG': '🇫🇷', 'ORY': '🇫🇷', 'NCE': '🇫🇷', 'MRS': '🇫🇷', 'BIQ': '🇫🇷', 'PIS': '🇫🇷', 'PUY': '🇫🇷',
-        'FRA': '🇩🇪', 'MUC': '🇩🇪', 'BER': '🇩🇪', 'HAM': '🇩🇪', 'STR': '🇩🇪', 'DUS': '🇩🇪', 'CGN': '🇩🇪', 'LEJ': '🇩🇪', 'DTM': '🇩🇪',
-        'AMS': '🇳🇱', 'RTM': '🇳🇱', 'EIN': '🇳🇱',
-        'ATH': '🇬🇷', 'SKG': '🇬🇷', 'CFU': '🇬🇷', 'HER': '🇬🇷', 'RHO': '🇬🇷', 'ZTH': '🇬🇷', 'JTR': '🇬🇷', 'CHQ': '🇬🇷',
-        'LIS': '🇵🇹', 'OPO': '🇵🇹', 'PDL': '🇵🇹', 'PXO': '🇵🇹',  # Portugal - FIXED: LIS included
-        'ARN': '🇸🇪', 'NYO': '🇸🇪', 'OSL': '🇳🇴', 'BGO': '🇳🇴', 'BOO': '🇳🇴',  # Scandinavia
-        'HEL': '🇫🇮', 'RVN': '🇫🇮', 'KEF': '🇮🇸', 'CPH': '🇩🇰',  # Nordic
-        'VIE': '🇦🇹', 'PRG': '🇨🇿', 'BRU': '🇧🇪', 'CRL': '🇧🇪', 'ZUR': '🇨🇭', 'BSL': '🇨🇭', 'GVA': '🇨🇭',  # Central Europe
-        'BUD': '🇭🇺', 'DUB': '🇮🇪', 'VAR': '🇧🇬', 'BOJ': '🇧🇬', 'SOF': '🇧🇬',  # Eastern Europe
-        'OTP': '🇷🇴', 'CLJ': '🇷🇴', 'SPU': '🇭🇷', 'DBV': '🇭🇷', 'ZAD': '🇭🇷',  # Balkans
-        'BEG': '🇷🇸', 'TIV': '🇲🇪', 'TGD': '🇲🇪', 'TIA': '🇦🇱', 'KRK': '🇵🇱', 'KTW': '🇵🇱',  # Balkans/Poland
-        'LED': '🇷🇺', 'SVO': '🇷🇺', 'DME': '🇷🇺', 'VKO': '🇷🇺', 'AER': '🇷🇺', 'OVB': '🇷🇺', 'IKT': '🇷🇺',  # Russia
-        'ULV': '🇷🇺', 'KJA': '🇷🇺', 'KGD': '🇷🇺', 'MSQ': '🇧🇾',  # Russia/Belarus
-        'AYT': '🇹🇷', 'IST': '🇹🇷', 'SAW': '🇹🇷', 'ESB': '🇹🇷', 'IZM': '🇹🇷', 'ADB': '🇹🇷',  # Turkey
-        'TLV': '🇮🇱', 'EVN': '🇦🇲', 'TBS': '🇬🇪', 'GYD': '🇦🇿', 'KUT': '🇬🇪', 'FRU': '🇰🇬', 'TAS': '🇺🇿',  # Middle East/Central Asia
-        'DXB': '🇦🇪', 'SHJ': '🇦🇪', 'AUH': '🇦🇪', 'DWC': '🇦🇪', 'DOH': '🇶🇦', 'RUH': '🇸🇦', 'JED': '🇸🇦', 'DMM': '🇸🇦',  # Gulf
-        'SSH': '🇪🇬', 'CAI': '🇪🇬', 'RAK': '🇲🇦', 'DJE': '🇹🇳',  # North Africa
-        'TNR': '🇲🇬', 'ZNZ': '🇹🇿',  # East Africa
-        'EWR': '🇺🇸', 'JFK': '🇺🇸', 'LGA': '🇺🇸', 'MIA': '🇺🇸', 'PHL': '🇺🇸',  # USA
-        'YYZ': '🇨🇦', 'YWG': '🇨🇦', 'YEG': '🇨🇦', 'HAV': '🇨🇺', 'PUJ': '🇩🇴',  # Americas
-        'HKT': '🇹🇭', 'BKK': '🇹🇭', 'DMK': '🇹🇭', 'DPS': '🇮🇩',  # Southeast Asia
-        'ICN': '🇰🇷', 'GMP': '🇰🇷', 'NRT': '🇯🇵', 'HND': '🇯🇵', 'KIX': '🇯🇵', 'ITM': '🇯🇵',  # East Asia
-        'PEK': '🇨🇳', 'CMB': '🇱🇰', 'DEL': '🇮🇳', 'SYD': '🇦🇺'  # Asia/Oceania
-    }
-    
-    _CITIES = {
-        'WAW': 'Warsaw', 'FCO': 'Rome', 'MAD': 'Madrid', 'BCN': 'Barcelona', 'LHR': 'London', 'AMS': 'Amsterdam',
-        'ATH': 'Athens', 'CDG': 'Paris', 'MUC': 'Munich', 'VIE': 'Vienna', 'PRG': 'Prague', 'BRU': 'Brussels',
-        'ORY': 'Paris', 'LIN': 'Milan', 'BGY': 'Milan', 'CIA': 'Rome', 'GOA': 'Genoa', 'PMI': 'Palma',
-        'MXP': 'Milan', 'VCE': 'Venice', 'NAP': 'Naples', 'LIS': 'Lisbon', 'LTN': 'London', 'LGW': 'London',  # FIXED: LIS added
-        'STN': 'London', 'ARN': 'Stockholm', 'OSL': 'Oslo', 'NYO': 'Stockholm', 'FRA': 'Frankfurt',
-        'VAR': 'Varna', 'PSA': 'Pisa', 'EWR': 'New York', 'JFK': 'New York', 'LGA': 'New York',
-        'MIA': 'Miami', 'BLQ': 'Bologna', 'FLR': 'Florence', 'CAG': 'Cagliari', 'BRI': 'Bari',
-        'CTA': 'Catania', 'PMO': 'Palermo', 'BUS': 'Batum', 'AHO': 'Alghero', 'SKG': 'Thessaloniki',
-        'CFU': 'Corfu', 'HER': 'Heraklion', 'RHO': 'Rhodes', 'ZTH': 'Zakynthos', 'JTR': 'Santorini',
-        'CHQ': 'Chania', 'OPO': 'Porto', 'SPU': 'Split', 'DBV': 'Dubrovnik', 'ZAD': 'Zadar',
-        'BEG': 'Belgrade', 'TIV': 'Tivat', 'TGD': 'Podgorica', 'TIA': 'Tirana', 'SOF': 'Sofia',
-        'OTP': 'Bucharest', 'CLJ': 'Cluj-Napoca', 'KRK': 'Krakow', 'KTW': 'Katowice', 'KGD': 'Kaliningrad',
-        'LED': 'St. Petersburg', 'SVO': 'Moscow', 'DME': 'Moscow', 'VKO': 'Moscow', 'AYT': 'Antalya',
-        'IST': 'Istanbul', 'SAW': 'Istanbul', 'ESB': 'Ankara', 'IZM': 'Izmir', 'ADB': 'Izmir',
-        'TLV': 'Tel Aviv', 'EVN': 'Yerevan', 'TBS': 'Tbilisi', 'GYD': 'Baku', 'KUT': 'Kutaisi',
-        'MSQ': 'Minsk', 'HEL': 'Helsinki', 'KEF': 'Reykjavik', 'BUD': 'Budapest', 'DUB': 'Dublin',
-        'GLA': 'Glasgow', 'BFS': 'Belfast', 'NCE': 'Nice', 'MRS': 'Marseille', 'TFS': 'Tenerife',
-        'LPA': 'Las Palmas', 'IBZ': 'Ibiza', 'VLC': 'Valencia', 'ALC': 'Alicante', 'AGP': 'Malaga',
-        'BIO': 'Bilbao', 'SPC': 'La Palma', 'PDL': 'Ponta Delgada', 'PXO': 'Porto Santo',
-        'RAK': 'Marrakech', 'CAI': 'Cairo', 'DJE': 'Djerba', 'TNR': 'Antananarivo', 'ZNZ': 'Zanzibar',
-        'DXB': 'Dubai', 'SHJ': 'Sharjah', 'AUH': 'Abu Dhabi', 'DOH': 'Doha', 'RUH': 'Riyadh',
-        'JED': 'Jeddah', 'DMM': 'Dammam', 'SSH': 'Sharm El Sheikh', 'HKT': 'Phuket', 'BKK': 'Bangkok',
-        'DMK': 'Bangkok', 'DPS': 'Denpasar', 'ICN': 'Seoul', 'GMP': 'Seoul', 'NRT': 'Tokyo',
-        'HND': 'Tokyo', 'KIX': 'Osaka', 'ITM': 'Osaka', 'PEK': 'Beijing', 'YYZ': 'Toronto',
-        'YWG': 'Winnipeg', 'YEG': 'Edmonton', 'HAV': 'Havana', 'PUJ': 'Punta Cana', 'CMB': 'Colombo',
-        'DEL': 'Delhi', 'SYD': 'Sydney', 'OVB': 'Novosibirsk', 'IKT': 'Irkutsk', 'ULV': 'Ulyanovsk',
-        'KJA': 'Krasnoyarsk', 'FRU': 'Bishkek', 'BOO': 'Bodø', 'BGO': 'Bergen', 'RVN': 'Rovaniemi',
-        'DTM': 'Dortmund', 'STR': 'Stuttgart', 'HAM': 'Hamburg', 'RTM': 'Rotterdam', 'EIN': 'Eindhoven',
-        'BSL': 'Basel', 'ZUR': 'Zurich', 'GVA': 'Geneva', 'CPH': 'Copenhagen', 'BIQ': 'Biarritz',
-        'PIS': 'Poitiers', 'CRL': 'Brussels', 'PUY': 'Puy-en-Velay', 'DWC': 'Dubai', 'AER': 'Sochi',
-        'PHL': 'Philadelphia', 'TAS': 'Tashkent', 'BOJ': 'Burgas'
-    }
-    
-    _COUNTRIES = {
-        'FCO': 'Italy', 'MXP': 'Italy', 'LIN': 'Italy', 'BGY': 'Italy', 'CIA': 'Italy', 'VCE': 'Italy', 
-        'NAP': 'Italy', 'GOA': 'Italy', 'PMO': 'Italy', 'BLQ': 'Italy', 'FLR': 'Italy', 'PSA': 'Italy',
-        'CAG': 'Italy', 'BRI': 'Italy', 'CTA': 'Italy', 'BUS': 'Italy', 'AHO': 'Italy',
-        'MAD': 'Spain', 'BCN': 'Spain', 'PMI': 'Spain', 'IBZ': 'Spain', 'VLC': 'Spain', 'ALC': 'Spain',
-        'AGP': 'Spain', 'BIO': 'Spain', 'LPA': 'Spain', 'TFS': 'Spain', 'SPC': 'Spain',
-        'LHR': 'United Kingdom', 'LTN': 'United Kingdom', 'LGW': 'United Kingdom', 'STN': 'United Kingdom',
-        'GLA': 'United Kingdom', 'BFS': 'United Kingdom',
-        'CDG': 'France', 'ORY': 'France', 'NCE': 'France', 'MRS': 'France', 'BIQ': 'France',
-        'PIS': 'France', 'PUY': 'France',
-        'FRA': 'Germany', 'MUC': 'Germany', 'BER': 'Germany', 'HAM': 'Germany', 'STR': 'Germany',
-        'DUS': 'Germany', 'CGN': 'Germany', 'LEJ': 'Germany', 'DTM': 'Germany',
-        'AMS': 'Netherlands', 'RTM': 'Netherlands', 'EIN': 'Netherlands',
-        'ATH': 'Greece', 'SKG': 'Greece', 'CFU': 'Greece', 'HER': 'Greece', 'RHO': 'Greece',
-        'ZTH': 'Greece', 'JTR': 'Greece', 'CHQ': 'Greece',
-        'LIS': 'Portugal', 'OPO': 'Portugal', 'PDL': 'Portugal', 'PXO': 'Portugal',  # FIXED: LIS included
-        'ARN': 'Sweden', 'NYO': 'Sweden', 'OSL': 'Norway', 'BGO': 'Norway', 'BOO': 'Norway',
-        'HEL': 'Finland', 'RVN': 'Finland', 'KEF': 'Iceland', 'CPH': 'Denmark',
-        'VIE': 'Austria', 'PRG': 'Czech Republic', 'BRU': 'Belgium', 'CRL': 'Belgium',
-        'ZUR': 'Switzerland', 'BSL': 'Switzerland', 'GVA': 'Switzerland', 'BUD': 'Hungary',
-        'DUB': 'Ireland', 'VAR': 'Bulgaria', 'BOJ': 'Bulgaria', 'SOF': 'Bulgaria',
-        'OTP': 'Romania', 'CLJ': 'Romania', 'SPU': 'Croatia', 'DBV': 'Croatia', 'ZAD': 'Croatia',
-        'BEG': 'Serbia', 'TIV': 'Montenegro', 'TGD': 'Montenegro', 'TIA': 'Albania',
-        'KRK': 'Poland', 'KTW': 'Poland', 'KGD': 'Russia', 'LED': 'Russia', 'SVO': 'Russia',
-        'DME': 'Russia', 'VKO': 'Russia', 'AER': 'Russia', 'OVB': 'Russia', 'IKT': 'Russia',
-        'ULV': 'Russia', 'KJA': 'Russia', 'MSQ': 'Belarus',
-        'AYT': 'Turkey', 'IST': 'Turkey', 'SAW': 'Turkey', 'ESB': 'Turkey', 'IZM': 'Turkey', 'ADB': 'Turkey',
-        'TLV': 'Israel', 'EVN': 'Armenia', 'TBS': 'Georgia', 'GYD': 'Azerbaijan', 'KUT': 'Georgia',
-        'FRU': 'Kyrgyzstan', 'TAS': 'Uzbekistan',
-        'EWR': 'United States', 'JFK': 'United States', 'LGA': 'United States', 'MIA': 'United States',
-        'PHL': 'United States', 'YYZ': 'Canada', 'YWG': 'Canada', 'YEG': 'Canada',
-        'HAV': 'Cuba', 'PUJ': 'Dominican Republic',
-        'DXB': 'United Arab Emirates', 'SHJ': 'United Arab Emirates', 'AUH': 'United Arab Emirates',
-        'DWC': 'United Arab Emirates', 'DOH': 'Qatar', 'RUH': 'Saudi Arabia', 'JED': 'Saudi Arabia',
-        'DMM': 'Saudi Arabia', 'SSH': 'Egypt', 'CAI': 'Egypt',
-        'RAK': 'Morocco', 'DJE': 'Tunisia', 'TNR': 'Madagascar', 'ZNZ': 'Tanzania',
-        'HKT': 'Thailand', 'BKK': 'Thailand', 'DMK': 'Thailand', 'DPS': 'Indonesia',
-        'ICN': 'South Korea', 'GMP': 'South Korea', 'NRT': 'Japan', 'HND': 'Japan',
-        'KIX': 'Japan', 'ITM': 'Japan', 'PEK': 'China', 'CMB': 'Sri Lanka', 'DEL': 'India',
-        'SYD': 'Australia'
-    }
-    
-    def _format_date_range(self, departure_date: str, return_date: str) -> str:
-        """Format date range compactly"""
-        try:
-            dep = datetime.strptime(departure_date, '%Y-%m-%d').strftime('%b %d')
-            ret = datetime.strptime(return_date, '%Y-%m-%d')
-            ret_fmt = ret.strftime('%d' if departure_date[:7] == return_date[:7] else '%b %d')
-            return f"{dep}-{ret_fmt}"
-        except Exception:
-            return f"{departure_date}-{return_date}"
-    
-    def _format_flight_type(self) -> str:
-        """Format flight connections"""
-        out = "Direct" if self.outbound_stops == 0 else f"{self.outbound_stops} stop{'s' if self.outbound_stops > 1 else ''}"
-        ret = "Direct" if self.return_stops == 0 else f"{self.return_stops} stop{'s' if self.return_stops > 1 else ''}"
-        return "Direct flights" if out == ret == "Direct" else f"Out: {out}, Return: {ret}"
-    
-    def __str__(self):
-        origin = self._CITIES.get('WAW', 'Warsaw')
-        dest = self._CITIES.get(self.destination, self.destination)
-        country = self._COUNTRIES.get(self.destination, '')
-        flag = self._FLAGS.get(self.destination, '')
-        
-        header = f"*{origin} → {dest}{f', {country} {flag}' if country and flag else ''}: {self.price:.0f} zł*"
-        date_range = self._format_date_range(self.departure_at[:10], self.return_at[:10])
-        
-        return (f"{header}\n\n"
-                f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n"
-                f"📊 {self.savings_percent:.0f}% below typical ({self.median_price:.0f} zł)\n\n"
-                f"🔗 [Book Deal]({self.booking_link})")
-
-class MongoFlightCache:
-    """MongoDB-based flight cache with persistent 45-day rolling window - ALWAYS UPDATES"""
-    
-    def __init__(self, connection_string: str):
-        self.connection_string = connection_string
-        self.client = None
-        self.db = None
-        self.CACHE_DAYS = 45  # 1.5 months (realistic for 512 MB MongoDB)
-        self._connect()
-    
-    def _connect(self):
-        """Connect to MongoDB Atlas"""
-        try:
-            console.info("🔗 Connecting to MongoDB Atlas...")
-            self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=10000)
-            # Test connection
-            self.client.admin.command('ping')
-            self.db = self.client['flight_bot_db']
-            console.info("✅ Connected to MongoDB Atlas successfully")
-        except ConnectionFailure as e:
-            console.info(f"❌ Failed to connect to MongoDB: {e}")
-            raise
-        except Exception as e:
-            console.info(f"❌ MongoDB connection error: {e}")
-            raise
-    
-    def cache_daily_data(self, api, destinations: List[str], months: List[str]):
-        """Cache daily flight data to MongoDB - ALWAYS PERFORMS FULL UPDATE"""
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
-        console.info(f"📅 Cache date: {today} (ALWAYS updates - no skipping)")
-        
-        # Remove today's data if any exists (ensures fresh daily data)
-        try:
-            deleted = self.db.flight_data.delete_many({'cached_date': today})
-            if deleted.deleted_count > 0:
-                console.info(f"🧹 Removed {deleted.deleted_count} existing entries for {today}")
-        except Exception as e:
-            console.info(f"⚠️ Error cleaning today's data: {e}")
-        
-        # Batch insert for better performance
-        all_entries = []
-        total_cached = 0
-        successful_destinations = 0
-        
-        for i, destination in enumerate(destinations, 1):
-            console.info(f"📥 [{i}/{len(destinations)}] Caching {destination}")
-            
-            try:
-                combinations = api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
-                
-                if combinations:
-                    for combo in combinations:
-                        all_entries.append({
-                            'destination': destination,
-                            'outbound_date': combo.outbound_date,
-                            'return_date': combo.return_date,
-                            'price': combo.total_price,
-                            'transfers_out': combo.outbound_transfers,
-                            'transfers_return': combo.return_transfers,
-                            'airline': combo.outbound_airline,
-                            'cached_date': today,
-                            'trip_duration': combo.duration_days
-                        })
-                    
-                    successful_destinations += 1
-                    console.info(f"  ✅ {destination}: Cached {len(combinations)} combinations")
-                else:
-                    console.info(f"  ⚠️ {destination}: No valid combinations found")
-                
-                # Batch insert every 1000 entries for memory efficiency
-                if len(all_entries) >= 1000:
-                    try:
-                        self.db.flight_data.insert_many(all_entries, ordered=False)
-                        total_cached += len(all_entries)
-                        all_entries.clear()
-                    except Exception as e:
-                        console.info(f"⚠️ Batch insert error: {e}")
-                        all_entries.clear()
-                
-                # Small delay to be nice to the API
-                if i % 10 == 0:
-                    time.sleep(1)
-                
-            except Exception as e:
-                console.info(f"  ❌ {destination}: Error - {e}")
-                logger.error(f"Cache error for {destination}: {e}")
-        
-        # Insert remaining entries
-        if all_entries:
-            try:
-                self.db.flight_data.insert_many(all_entries, ordered=False)
-                total_cached += len(all_entries)
-            except Exception as e:
-                console.info(f"⚠️ Final batch insert error: {e}")
-        
-        # Update statistics for all destinations that have data
-        self._update_all_destination_stats()
-        
-        # Clean up old data (keep 45-day window)
-        self._manage_rolling_window(today)
-        
-        console.info(f
+    main()
