@@ -1142,7 +1142,6 @@ class MongoFlightBot:
         # Efficient categorization based on percentile scores
         exceptional = sum(1 for d in deals if d.z_score >= self.PERCENTILE_THRESHOLDS['exceptional'])
         excellent = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['excellent'] <= d.z_score < self.PERCENTILE_THRESHOLDS['exceptional'])
-        great = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['great'] <= d.z_score < self.PERCENTILE_THRESHOLDS['excellent'])
         
         # Calculate savings
         total_savings = sum(d.savings_percent for d in deals)
@@ -1155,7 +1154,6 @@ class MongoFlightBot:
                   f"✅ **{len(deals)} DEALS FOUND**\n"
                   f"🔥 {exceptional} exceptional (P≥{self.PERCENTILE_THRESHOLDS['exceptional']})\n"
                   f"💎 {excellent} excellent (P≥{self.PERCENTILE_THRESHOLDS['excellent']})\n"
-                  f"💰 {great} great (P≥{self.PERCENTILE_THRESHOLDS['great']})\n\n"
                   f"📊 Average savings: {avg_savings:.0f}%\n"
                   f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
                   f"🎯 Smart deduplication active (max 1 deal per destination)\n"
