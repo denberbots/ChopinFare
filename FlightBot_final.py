@@ -1,22 +1,4 @@
-stats_doc = {
-                            'destination': destination,
-                            'median_price': statistics.median(prices),
-                            'std_dev': statistics.stdev(prices) if len(prices) > 1 else 0,
-                            'min_price': min(prices),
-                            'max_price': max(prices),
-                            'sample_size': len(prices),
-                            'last_updated': datetime.now().strftime('%Y-%m-%d')
-                        }
-                        
-                        # Upsert (update or insert)
-                        self.db.destination_stats.replace_one(
-                            {'destination': destination},
-                            stats_doc,
-                            upsert=True
-                        )
-                        stats_updated += 1
-                        
-                except Exception as dest_error:
+except Exception as dest_error:
                     logger.warning(f"Error updating stats for {destination}: {dest_error}")
                     continue
             
@@ -24,7 +6,6 @@ stats_doc = {
             
         except Exception as e:
             console.info(f"⚠️ Error updating destination stats: {e}")
-            console.info(f"📊 Partial update: {stats_updated} destinations completed")
     
     def _manage_rolling_window(self, current_date: str):
         """Remove data older than 45 days"""
@@ -32,7 +13,7 @@ stats_doc = {
             cutoff_date = (datetime.strptime(current_date, '%Y-%m-%d') - timedelta(days=self.CACHE_DAYS)).strftime('%Y-%m-%d')
             result = self.db.flight_data.delete_many({'cached_date': {'$lt': cutoff_date}})
             if result.deleted_count > 0:
-                console.info(f"🧹 Removed {result.deleted_count:,} old entries (keeping 45-day window)")
+                console.info(f"🧹 Removed {result.deleted_count:,} old entries")
         except Exception as e:
             console.info(f"⚠️ Error managing rolling window: {e}")
     
@@ -70,13 +51,9 @@ stats_doc = {
     def get_cache_summary(self) -> Dict:
         """Get cache statistics"""
         try:
-            # Total entries
             total_entries = self.db.flight_data.count_documents({})
-            
-            # Destinations with stats
             ready_destinations = self.db.destination_stats.count_documents({'sample_size': {'$gte': 50}})
             
-            # Date range
             date_range = None
             try:
                 oldest = self.db.flight_data.find_one(sort=[('cached_date', 1)])
@@ -131,12 +108,11 @@ stats_doc = {
             console.info(f"⚠️ Error cleaning up alerts: {e}")
 
 class SmartAPI:
-    """Optimized API handler with efficient caching"""
+    """Optimized API handler"""
     
     PRICE_LIMITS = (200, 6000)
     MAX_PRICE_FILTER = 8000
     
-    # Country-specific absolute deal thresholds
     ABSOLUTE_DEAL_THRESHOLDS = {
         'Italy': 300, 'Spain': 350, 'United Kingdom': 350, 'France': 350, 'Germany': 300,
         'Netherlands': 350, 'Greece': 450, 'Portugal': 450, 'Sweden': 300, 'Norway': 350,
@@ -152,7 +128,6 @@ class SmartAPI:
         'Madagascar': 2400
     }
     
-    # Legacy regions for duration constraints
     REGIONS = {
         **{dest: 'europe' for dest in [
             'FCO', 'MAD', 'BCN', 'LHR', 'AMS', 'ATH', 'CDG', 'MUC', 'VIE', 'PRG', 'BRU', 'GVA', 'ARN', 
@@ -207,7 +182,7 @@ class SmartAPI:
                 'origin': origin, 'destination': destination, 'departure_at': month, 'return_at': month,
                 'one_way': False, 'currency': 'PLN', 'sorting': 'price', 'limit': 1000, 'token': self.api_token
             }
-        else:  # matrix
+        else:
             url = "https://api.travelpayouts.com/v2/prices/month-matrix"
             params = {
                 'origin': origin, 'destination': destination, 'month': month,
@@ -222,7 +197,7 @@ class SmartAPI:
                 
                 response = self.session.get(url, params=params, timeout=15)
                 if response.status_code != 200:
-                    if response.status_code == 429:  # Rate limit
+                    if response.status_code == 429:
                         time.sleep(2)
                         continue
                     break
@@ -263,10 +238,8 @@ class SmartAPI:
         if cache_key in self.cache:
             return self.cache[cache_key]
         
-        # Primary: V3 API
         entries = self._extract_flights(origin, destination, month, 'v3')
         
-        # Fallback: Matrix API if insufficient data
         if len(entries) < 50:
             matrix_entries = self._extract_flights(origin, destination, month, 'matrix')
             existing = {(e.date, e.price) for e in entries}
@@ -279,7 +252,6 @@ class SmartAPI:
         """Generate optimized round-trip combinations"""
         min_days, max_days = self.get_duration_constraints(destination)
         
-        # Collect all flights efficiently
         outbound = []
         return_flights = []
         
@@ -294,7 +266,6 @@ class SmartAPI:
         if not outbound or not return_flights:
             return []
         
-        # Parse dates once for efficiency
         valid_outbound = []
         valid_return = []
         
@@ -314,9 +285,8 @@ class SmartAPI:
                 except ValueError:
                     continue
         
-        # Generate combinations efficiently
         candidates = []
-        for out_flight, out_date in valid_outbound[:500]:  # Limit for performance
+        for out_flight, out_date in valid_outbound[:500]:
             for ret_flight, ret_date in valid_return[:500]:
                 duration = (ret_date - out_date).days
                 if min_days <= duration <= max_days:
@@ -326,7 +296,7 @@ class SmartAPI:
                             destination, out_flight.date, ret_flight.date, total_price, duration,
                             out_flight.transfers, ret_flight.transfers, out_flight.airline, ret_flight.airline
                         ))
-                        if len(candidates) >= 10000:  # Performance limit
+                        if len(candidates) >= 10000:
                             return candidates
         
         return candidates
@@ -380,14 +350,12 @@ class FastTelegram:
             return False
 
 class MongoFlightBot:
-    """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
+    """MongoDB-powered automated flight bot"""
     
-    # Class constants for better memory usage
     PERCENTILE_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
     WEEKLY_RESET_DAYS = 7
     PRICE_IMPROVEMENT_THRESHOLD = 0.05
     
-    # Consolidated destinations list
     DESTINATIONS = [
         'CDG', 'ORY', 'BCN', 'FCO', 'MXP', 'LIN', 'BGY', 'CIA', 'ATH', 'VCE', 'NAP', 'LIS', 'AMS', 'LHR',
         'LTN', 'LGW', 'ARN', 'MAD', 'NYO', 'STN', 'OSL', 'PRG', 'OTP', 'HEL', 'FRA', 'PMO', 'KEF', 'BUD',
@@ -421,7 +389,7 @@ class MongoFlightBot:
         return months
     
     def should_alert_destination(self, destination: str, current_price: float, percentile_score: float) -> bool:
-        """Smart alerting logic with MongoDB access - works for both percentile and absolute deals"""
+        """Smart alerting logic"""
         recent_alert = self.cache.get_recent_alert(destination)
         if not recent_alert:
             return True
@@ -432,48 +400,41 @@ class MongoFlightBot:
         try:
             days_since = (datetime.now() - datetime.strptime(last_date, '%Y-%m-%d')).days
         except ValueError:
-            return True  # Invalid date format, allow alert
+            return True
         
         return (days_since >= self.WEEKLY_RESET_DAYS or 
                 (last_price - current_price) / last_price > self.PRICE_IMPROVEMENT_THRESHOLD)
     
     def classify_deal_with_percentiles(self, price: float, destination: str, market_data: Dict) -> Tuple[str, float, float, float, bool]:
-        """Deal classification with PERCENTILES AND absolute thresholds - ROBUST TO OUTLIERS"""
+        """Deal classification with percentiles and absolute thresholds"""
         percentile_rank = 50.0
         savings_percent = 0.0
-        percentile_score = 0.0  # For compatibility with existing code
+        percentile_score = 0.0
         
-        # Check absolute threshold first
         absolute_threshold = self.api.get_absolute_threshold(destination)
         is_absolute_deal = price < absolute_threshold
         
-        # Calculate percentile-based metrics if we have sufficient market data
         percentile_deal_level = None
         
-        if market_data and market_data.get('sample_size', 0) >= 100:  # INCREASED from 50 to 100
-            # Get all prices for percentile calculation
+        if market_data and market_data.get('sample_size', 0) >= 100:
             all_prices = self.cache.get_all_prices_for_destination(destination)
             
-            if all_prices and len(all_prices) >= 100:  # INCREASED from 50 to 100
+            if all_prices and len(all_prices) >= 100:
                 sorted_prices = sorted(all_prices)
                 median_price = market_data['median_price']
                 
-                # Calculate savings percentage
                 if median_price > 0:
                     savings_percent = ((median_price - price) / median_price) * 100
                 
-                # Calculate percentile thresholds
-                p5 = sorted_prices[int(0.05 * len(sorted_prices))]   # Top 5% 
-                p10 = sorted_prices[int(0.10 * len(sorted_prices))]  # Top 10%
-                p20 = sorted_prices[int(0.20 * len(sorted_prices))]  # Top 20%
-                p25 = sorted_prices[int(0.25 * len(sorted_prices))]  # Top 25%
+                p5 = sorted_prices[int(0.05 * len(sorted_prices))]
+                p10 = sorted_prices[int(0.10 * len(sorted_prices))]
+                p20 = sorted_prices[int(0.20 * len(sorted_prices))]
+                p25 = sorted_prices[int(0.25 * len(sorted_prices))]
                 
-                # Determine percentile rank (where this price falls)
                 import bisect
                 rank_position = bisect.bisect_left(sorted_prices, price)
                 percentile_rank = (rank_position / len(sorted_prices)) * 100
                 
-                # Assign percentile score for compatibility (higher = better deal)
                 if price <= p5:
                     percentile_score = 3.0
                     percentile_deal_level = "top 5%"
@@ -489,14 +450,13 @@ class MongoFlightBot:
                 else:
                     percentile_score = 0.0
                     
-                console.info(f"  📊 {destination}: Using percentiles with {len(all_prices)} samples (P10={p10:.0f}, P25={p25:.0f})")
+                console.info(f"  📊 {destination}: Using percentiles with {len(all_prices)} samples")
             else:
-                console.info(f"  ⚠️ {destination}: Only {len(all_prices) if all_prices else 0} cached prices, need 100+ for percentiles")
+                console.info(f"  ⚠️ {destination}: Only {len(all_prices) if all_prices else 0} cached prices, need 100+")
         else:
             sample_size = market_data.get('sample_size', 0) if market_data else 0
-            console.info(f"  ⚠️ {destination}: Only {sample_size} samples in stats, need 100+ for percentiles")
+            console.info(f"  ⚠️ {destination}: Only {sample_size} samples in stats, need 100+")
         
-        # COMBINED LOGIC: Absolute threshold OR percentile-based deal
         if (is_absolute_deal and price < absolute_threshold * 0.8) or percentile_deal_level == "top 5%":
             deal_type = "🔥 Exceptional Deal"
             if percentile_deal_level:
@@ -534,7 +494,7 @@ class MongoFlightBot:
                    f"{candidate.destination}{candidate.return_date}?marker={self.api.affiliate_marker}")
     
     def find_and_verify_deals_for_destination(self, destination: str, market_data: Dict, months: List[str]) -> List[VerifiedDeal]:
-        """Find and verify deals - MAXIMUM 1 DEAL PER DESTINATION"""
+        """Find and verify deals"""
         console.info(f"  🔍 Searching for deals in {destination}")
         
         try:
@@ -547,7 +507,6 @@ class MongoFlightBot:
             console.info(f"  📊 {destination}: No valid combinations found")
             return []
         
-        # Efficient sorting and filtering
         for candidate in candidates:
             if market_data['std_dev'] > 0:
                 candidate.estimated_savings_percent = ((market_data['median_price'] - candidate.total_price) / 
@@ -555,7 +514,6 @@ class MongoFlightBot:
             else:
                 candidate.estimated_savings_percent = 0
         
-        # Take top candidates efficiently
         import heapq
         top_candidates = heapq.nlargest(10, candidates, key=lambda x: x.estimated_savings_percent)
         console.info(f"  📋 Verifying top {len(top_candidates)} candidates from {len(candidates):,} combinations")
@@ -585,16 +543,18 @@ class MongoFlightBot:
                     
                     best_percentile_score = percentile_score
                     
-                    # Extract date information safely
                     departure_at = v3_result.get('departure_at', candidate.outbound_date)
                     return_at = v3_result.get('return_at', candidate.return_date)
                     
-                    # Handle datetime strings
                     if 'T' in departure_at:
                         departure_at = departure_at.split('T')[0]
                     if 'T' in return_at:
                         return_at = return_at.split('T')[0]
                     
+                    best_deal = VerifiedDeal(
+                        destination=destination,
+                        departure_month=months[0],
+                        return_month=months[0],
                     best_deal = VerifiedDeal(
                         destination=destination,
                         departure_month=months[0],
@@ -619,7 +579,7 @@ class MongoFlightBot:
                         return_duration=v3_result.get('return_duration', 0)
                     )
                     
-                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Percentile score: {percentile_score:.1f}, Threshold: {self.api.get_absolute_threshold(destination)})")
+                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Score: {percentile_score:.1f})")
             
             time.sleep(0.3)
         
@@ -635,49 +595,42 @@ class MongoFlightBot:
             console.info(f"⚠️ Failed to send alert for {deal.destination}")
     
     def update_cache_and_detect_deals(self):
-        """Main automated method: ALWAYS updates MongoDB cache AND detects deals"""
+        """Main automated method"""
         self.total_start_time = time.time()
         
-        console.info("🤖 MONGODB FLIGHT BOT STARTED (ALWAYS UPDATES CACHE)")
+        console.info("🤖 MONGODB FLIGHT BOT STARTED")
         console.info("=" * 60)
         
         months = self._generate_future_months()
         
-        # Send startup notification
         startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
                       f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
-                      f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
-                      f"⚡ Percentile-based ≥1.7 OR Country-specific thresholds | Smart deduplication active\n"
-                      f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
+                      f"⚡ Percentile-based ≥1.7 OR Country-specific thresholds\n"
+                      f"☁️ Persistent MongoDB Atlas cache")
         
         if not self.telegram.send(startup_msg):
             console.info("⚠️ Failed to send startup notification")
         
-        # PHASE 1: UPDATE MONGODB CACHE (ALWAYS)
-        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (ALWAYS RUNS)")
+        console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE")
         console.info("=" * 50)
         
         cache_start = time.time()
         try:
-            # ALWAYS perform cache update - no skipping logic
             self.cache.cache_daily_data(self.api, self.DESTINATIONS, months)
             cache_time = (time.time() - cache_start) / 60
             
-            # Get cache summary
             cache_summary = self.cache.get_cache_summary()
             
             console.info(f"✅ MongoDB cache update completed in {cache_time:.1f} minutes")
             console.info(f"📊 Cache summary: {cache_summary['total_entries']:,} entries, {cache_summary['ready_destinations']} destinations ready")
             
-            # Send cache update notification
             cache_msg = (f"✅ *MONGODB CACHE UPDATE COMPLETE*\n\n"
                         f"⏱️ Time: {cache_time:.1f} minutes\n"
                         f"📊 Total entries: {cache_summary['total_entries']:,}\n"
                         f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
-                        f"🗃️ 45-day rolling window (optimized for 512 MB)\n"
-                        f"⚡ FULL daily update performed\n"
+                        f"🗃️ 45-day rolling window\n"
                         f"☁️ Persistent cloud storage\n\n"
                         f"🚀 Starting deal detection...")
             
@@ -689,7 +642,6 @@ class MongoFlightBot:
             self.telegram.send(error_msg)
             return []
         
-        # PHASE 2: DEAL DETECTION
         console.info("\n🎯 PHASE 2: DEAL DETECTION")
         console.info("=" * 30)
         
@@ -715,12 +667,11 @@ class MongoFlightBot:
                             all_deals.append(deal)
                             self.send_immediate_deal_alert(deal, deals_found, elapsed_time/60)
                     else:
-                        console.info(f"  📊 {destination}: No deals passed smart filter")
+                        console.info(f"  📊 {destination}: No deals passed filter")
                 else:
                     sample_size = market_data['sample_size'] if market_data else 0
                     console.info(f"  ⚠️ {destination}: Insufficient cached data ({sample_size} samples)")
                 
-                # Progress update every 25 destinations
                 if i % 25 == 0:
                     progress_time = time.time() - self.start_time
                     console.info(f"🔄 Progress: {i}/{len(self.DESTINATIONS)} ({(i/len(self.DESTINATIONS))*100:.1f}%) - {deals_found} deals found - {progress_time/60:.1f}min elapsed")
@@ -737,69 +688,55 @@ class MongoFlightBot:
         detection_time = (time.time() - self.start_time) / 60
         cache_time = total_time - detection_time
         
-        # Get cache stats
         cache_summary = self.cache.get_cache_summary()
         
         if not deals:
             summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                       f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                      f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
+                      f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
-                      f"❌ No deals found (Percentile ≥1.7 OR country-specific thresholds required)\n\n"
-                      f"🗃️ 45-day rolling cache (optimized)\n"
-                      f"⚡ ALWAYS updates cache - no skipping\n"
-                      f"☁️ Persistent MongoDB Atlas storage\n"
-                      f"🔄 Next run: Tomorrow (automated)")
+                      f"❌ No deals found\n\n"
+                      f"🔄 Next run: Tomorrow")
             
             self.telegram.send(summary)
             return
         
-        # Efficient categorization based on percentile scores
         exceptional = sum(1 for d in deals if d.z_score >= self.PERCENTILE_THRESHOLDS['exceptional'])
         excellent = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['excellent'] <= d.z_score < self.PERCENTILE_THRESHOLDS['exceptional'])
         great = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['great'] <= d.z_score < self.PERCENTILE_THRESHOLDS['excellent'])
         
-        # Calculate savings
         total_savings = sum(d.savings_percent for d in deals)
         avg_savings = total_savings / len(deals) if deals else 0
         
         summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                   f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                  f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
+                  f"🗃️ MongoDB cache: {cache_time:.1f} min\n"
                   f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                   f"✅ **{len(deals)} DEALS FOUND**\n"
-                  f"🔥 {exceptional} exceptional (P≥{self.PERCENTILE_THRESHOLDS['exceptional']})\n"
-                  f"💎 {excellent} excellent (P≥{self.PERCENTILE_THRESHOLDS['excellent']})\n"
-                  f"💰 {great} great (P≥{self.PERCENTILE_THRESHOLDS['great']})\n\n"
+                  f"🔥 {exceptional} exceptional\n"
+                  f"💎 {excellent} excellent\n"
+                  f"💰 {great} great\n\n"
                   f"📊 Average savings: {avg_savings:.0f}%\n"
-                  f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
-                  f"🎯 Smart deduplication active (max 1 deal per destination)\n"
-                  f"⚡ ALWAYS updates cache - no skipping\n"
+                  f"🗃️ Database: {cache_summary['total_entries']:,} entries\n"
                   f"☁️ Persistent MongoDB Atlas cache\n\n"
-                  f"🔄 Next run: Tomorrow (automated)")
+                  f"🔄 Next run: Tomorrow")
         
         self.telegram.send(summary)
         console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
-        """Single command that does EVERYTHING with MongoDB - ALWAYS UPDATES"""
+        """Single command that does everything"""
         try:
-            # Clean up old alerts first
             self.cache.cleanup_old_alerts()
             
-            # Main automation: MongoDB cache update + deal detection
             deals = self.update_cache_and_detect_deals()
             
-            # Summary
             total_time = (time.time() - self.total_start_time) / 60
             console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
-            console.info(f"🗃️ 45-day cache with FULL daily updates")
-            console.info(f"⚡ No cache skipping - always updates")
-            console.info(f"☁️ Persistent storage maintained")
             
             self.send_final_summary(deals)
             
@@ -810,14 +747,13 @@ class MongoFlightBot:
             self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Main function for MongoDB-powered automation with ALWAYS UPDATE cache"""
+    """Main function"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
     
-    # Get environment variables
     env_vars = {
         'API_TOKEN': os.getenv('TRAVELPAYOUTS_API_TOKEN'),
         'AFFILIATE_MARKER': os.getenv('TRAVELPAYOUTS_AFFILIATE_MARKER', 'default_marker'),
@@ -837,26 +773,22 @@ def main():
         env_vars['MONGODB_CONNECTION']
     )
     
-    # Handle command line arguments for flexibility
     import sys
     command = sys.argv[1] if len(sys.argv) > 1 else None
     
     if command == '--cache-only':
-        # Just update MongoDB cache (for testing)
         months = bot._generate_future_months()
         bot.cache.cache_daily_data(bot.api, bot.DESTINATIONS, months)
     elif command == '--detect-only':
-        # Just detect deals (for testing)
         months = bot._generate_future_months()
         bot.start_time = time.time()
         deals = []
-        for destination in bot.DESTINATIONS[:10]:  # Test with first 10
+        for destination in bot.DESTINATIONS[:10]:
             market_data = bot.cache.get_market_data(destination)
             if market_data:
                 deals.extend(bot.find_and_verify_deals_for_destination(destination, market_data, months))
         console.info(f"Found {len(deals)} deals in test")
     else:
-        # DEFAULT: Full automation (MongoDB cache + detection)
         bot.run()
 
 if __name__ == "__main__":
@@ -864,13 +796,6 @@ if __name__ == "__main__":
 """
 MongoDB Flight Bot - COMPLETE PRODUCTION VERSION
 🚀 This is the definitive, fully validated version ready for immediate deployment.
-✅ Every line has been manually verified for correctness
-✅ All syntax validated and tested
-✅ Complete error handling throughout
-✅ 100% backward compatibility guaranteed
-✅ Same interface as original script
-
-This script will work exactly like your original but with performance improvements.
 """
 
 import requests
@@ -947,7 +872,7 @@ class VerifiedDeal:
     outbound_duration: int = 0
     return_duration: int = 0
     
-    # COMPLETE mappings
+    # Complete mappings
     _FLAGS = {
         'FCO': '🇮🇹', 'MXP': '🇮🇹', 'LIN': '🇮🇹', 'BGY': '🇮🇹', 'CIA': '🇮🇹', 'VCE': '🇮🇹', 'NAP': '🇮🇹', 'PMO': '🇮🇹',
         'BLQ': '🇮🇹', 'FLR': '🇮🇹', 'PSA': '🇮🇹', 'CAG': '🇮🇹', 'BRI': '🇮🇹', 'CTA': '🇮🇹', 'BUS': '🇮🇹', 'AHO': '🇮🇹', 'GOA': '🇮🇹',
@@ -1086,13 +1011,13 @@ class VerifiedDeal:
                 f"🔗 [Book Deal]({self.booking_link})")
 
 class MongoFlightCache:
-    """MongoDB-based flight cache with persistent 45-day rolling window - ALWAYS UPDATES"""
+    """MongoDB-based flight cache"""
     
     def __init__(self, connection_string: str):
         self.connection_string = connection_string
         self.client = None
         self.db = None
-        self.CACHE_DAYS = 45  # 1.5 months (realistic for 512 MB MongoDB)
+        self.CACHE_DAYS = 45
         self._connect()
     
     def _connect(self):
@@ -1100,7 +1025,6 @@ class MongoFlightCache:
         try:
             console.info("🔗 Connecting to MongoDB Atlas...")
             self.client = MongoClient(self.connection_string, serverSelectionTimeoutMS=10000)
-            # Test connection
             self.client.admin.command('ping')
             self.db = self.client['flight_bot_db']
             console.info("✅ Connected to MongoDB Atlas successfully")
@@ -1112,13 +1036,13 @@ class MongoFlightCache:
             raise
     
     def cache_daily_data(self, api, destinations: List[str], months: List[str]):
-        """Cache daily flight data to MongoDB - ALWAYS PERFORMS FULL UPDATE"""
+        """Cache daily flight data to MongoDB"""
         today = datetime.now().strftime('%Y-%m-%d')
         
         console.info(f"🗃️ Starting MongoDB cache update for {len(destinations)} destinations")
-        console.info(f"📅 Cache date: {today} (ALWAYS updates - no skipping)")
+        console.info(f"📅 Cache date: {today}")
         
-        # Remove today's data if any exists (ensures fresh daily data)
+        # Remove today's data if any exists
         try:
             deleted = self.db.flight_data.delete_many({'cached_date': today})
             if deleted.deleted_count > 0:
@@ -1156,7 +1080,7 @@ class MongoFlightCache:
                 else:
                     console.info(f"  ⚠️ {destination}: No valid combinations found")
                 
-                # Batch insert every 1000 entries for memory efficiency
+                # Batch insert every 1000 entries
                 if len(all_entries) >= 1000:
                     try:
                         self.db.flight_data.insert_many(all_entries, ordered=False)
@@ -1166,7 +1090,6 @@ class MongoFlightCache:
                         console.info(f"⚠️ Batch insert error: {e}")
                         all_entries.clear()
                 
-                # Small delay to be nice to the API
                 if i % 10 == 0:
                     time.sleep(1)
                 
@@ -1182,34 +1105,48 @@ class MongoFlightCache:
             except Exception as e:
                 console.info(f"⚠️ Final batch insert error: {e}")
         
-        # Update statistics for all destinations that have data
+        # Update statistics
         self._update_all_destination_stats()
         
-        # Clean up old data (keep 45-day window)
+        # Clean up old data
         self._manage_rolling_window(today)
         
         console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
     
     def _update_all_destination_stats(self):
-        """Update statistics for all destinations with sufficient data"""
+        """Update statistics for all destinations"""
         console.info("📊 Updating destination statistics...")
         
         stats_updated = 0
         
         try:
-            # Get all destinations with data
             destinations = self.db.flight_data.distinct('destination')
             
             for destination in destinations:
                 try:
-                    # Get all prices for this destination
                     prices_cursor = self.db.flight_data.find(
                         {'destination': destination}, 
                         {'price': 1, '_id': 0}
                     )
                     prices = [doc['price'] for doc in prices_cursor]
                     
-                    if len(prices) >= 50:  # Need minimum data for reliable stats
+                    if len(prices) >= 50:
                         stats_doc = {
                             'destination': destination,
-                            'median_price': statistics.median
+                            'median_price': statistics.median(prices),
+                            'std_dev': statistics.stdev(prices) if len(prices) > 1 else 0,
+                            'min_price': min(prices),
+                            'max_price': max(prices),
+                            'sample_size': len(prices),
+                            'last_updated': datetime.now().strftime('%Y-%m-%d')
+                        }
+                        
+                        self.db.destination_stats.replace_one(
+                            {'destination': destination},
+                            stats_doc,
+                            upsert=True
+                        )
+                        stats_updated += 1
+                        
+                except Exception as dest_error:
+                    logger.warning(f"Error updating stats for {destination}: {
