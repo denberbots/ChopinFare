@@ -774,7 +774,7 @@ class MongoFlightBot:
     """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
     
     # Class constants for better memory usage
-    PERCENTILE_THRESHOLDS = {'exceptional': 2.5, 'excellent': 2.0, 'great': 1.7, 'minimum': 1.7}
+    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'great': 2.0, 'minimum': 2.0}
     WEEKLY_RESET_DAYS = 7
     PRICE_IMPROVEMENT_THRESHOLD = 0.05
     
