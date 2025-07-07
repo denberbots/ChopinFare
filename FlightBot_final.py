@@ -774,7 +774,7 @@ class MongoFlightBot:
     """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
     
     # Class constants for better memory usage
-    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'great': 2.0, 'minimum': 2.0}
+    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'minimum': 2.5}
     WEEKLY_RESET_DAYS = 7
     PRICE_IMPROVEMENT_THRESHOLD = 0.05
     
@@ -870,12 +870,6 @@ class MongoFlightBot:
                 elif price <= p10:
                     percentile_score = 2.5
                     percentile_deal_level = "top 10%"
-                elif price <= p20:
-                    percentile_score = 2.0
-                    percentile_deal_level = "top 20%"
-                elif price <= p25:
-                    percentile_score = 1.7
-                    percentile_deal_level = "top 25%"
                 else:
                     percentile_score = 0.0
                     
