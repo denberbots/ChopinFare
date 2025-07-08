@@ -774,7 +774,7 @@ class MongoFlightBot:
     """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
     
     # Class constants for better memory usage
-    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'minimum': 2.5}
+    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'great': 2.0, 'minimum': 2.0}
     WEEKLY_RESET_DAYS = 7
     PRICE_IMPROVEMENT_THRESHOLD = 0.05
     
@@ -870,6 +870,12 @@ class MongoFlightBot:
                 elif price <= p10:
                     percentile_score = 2.5
                     percentile_deal_level = "top 10%"
+                elif price <= p20:
+                    percentile_score = 2.0
+                    percentile_deal_level = "top 20%"
+                elif price <= p25:
+                    percentile_score = 1.7
+                    percentile_deal_level = "top 25%"
                 else:
                     percentile_score = 0.0
                     
@@ -897,8 +903,12 @@ class MongoFlightBot:
                 deal_type += " (absolute)"
             return deal_type, percentile_score, savings_percent, percentile_rank, True
             
-        elif is_absolute_deal:
-            deal_type = "💰 Great Deal (absolute)"
+        elif is_absolute_deal or percentile_deal_level in ["top 20%", "top 25%"]:
+            deal_type = "💰 Great Deal"
+            if percentile_deal_level:
+                deal_type += f" ({percentile_deal_level})"
+            elif is_absolute_deal:
+                deal_type += " (absolute)"
             return deal_type, percentile_score, savings_percent, percentile_rank, True
             
         else:
@@ -916,17 +926,6 @@ class MongoFlightBot:
     def find_and_verify_deals_for_destination(self, destination: str, market_data: Dict, months: List[str]) -> List[VerifiedDeal]:
         """Find and verify deals - MAXIMUM 1 DEAL PER DESTINATION"""
         console.info(f"  🔍 Searching for deals in {destination}")
-        
-        # ADD DEBUG INFO:
-        absolute_threshold = self.api.get_absolute_threshold(destination)
-        console.info(f"  🎯 DEBUG: Absolute threshold = {absolute_threshold} zł")
-        if market_data.get('sample_size', 0) >= 100:
-            all_prices = self.cache.get_all_prices_for_destination(destination)
-            if all_prices and len(all_prices) >= 100:
-                sorted_prices = sorted(all_prices)
-                p5 = sorted_prices[int(0.05 * len(sorted_prices))]
-                p10 = sorted_prices[int(0.10 * len(sorted_prices))]
-                console.info(f"  🎯 DEBUG: P5 = {p5:.0f} zł, P10 = {p10:.0f} zł")
         
         try:
             candidates = self.api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
@@ -952,88 +951,66 @@ class MongoFlightBot:
         
         best_deal = None
         best_percentile_score = 0
-        debug_count = 0
         
         for candidate in top_candidates:
-            debug_count += 1
-            
             if candidate.estimated_savings_percent < 1.0:
-                console.info(f"    🔍 Candidate {debug_count}: Skipped - low savings estimate ({candidate.estimated_savings_percent:.1f})")
                 continue
-
-            console.info(f"    🔍 Candidate {debug_count}: Testing {candidate.total_price:.0f} zł ({candidate.outbound_date} to {candidate.return_date})")
             
             try:
                 v3_result = self.api.get_v3_verification('WAW', destination, candidate.outbound_date, candidate.return_date)
             except Exception as e:
-                console.info(f"    ❌ Candidate {debug_count}: API error - {e}")
                 logger.warning(f"V3 verification error for {destination}: {e}")
                 continue
-
+            
             if v3_result:
                 actual_price = v3_result.get('price', 0)
-                console.info(f"    ✅ Candidate {debug_count}: API verified price {actual_price:.0f} zł")
-                
                 if actual_price <= 0:
-                    console.info(f"    ❌ Candidate {debug_count}: Invalid price ({actual_price})")
                     continue
-
+                
                 deal_type, percentile_score, savings_percent, percentile_rank, is_deal = self.classify_deal_with_percentiles(actual_price, destination, market_data)
                 
-                console.info(f"    📊 Candidate {debug_count}: {deal_type} (score: {percentile_score:.1f}, savings: {savings_percent:.0f}%, is_deal: {is_deal})")
-                
-                if is_deal:
-                    should_alert = self.should_alert_destination(destination, actual_price, percentile_score)
-                    console.info(f"    🚨 Candidate {debug_count}: Should alert? {should_alert}")
+                if (is_deal and percentile_score > best_percentile_score and
+                    self.should_alert_destination(destination, actual_price, percentile_score)):
                     
-                    if should_alert and percentile_score > best_percentile_score:
-                        console.info(f"    🏆 Candidate {debug_count}: NEW BEST DEAL! (score: {percentile_score:.1f})")
-                        best_percentile_score = percentile_score
-                        
-                        # Extract date information safely
-                        departure_at = v3_result.get('departure_at', candidate.outbound_date)
-                        return_at = v3_result.get('return_at', candidate.return_date)
-                        
-                        # Handle datetime strings
-                        if 'T' in departure_at:
-                            departure_at = departure_at.split('T')[0]
-                        if 'T' in return_at:
-                            return_at = return_at.split('T')[0]
-                        
-                        best_deal = VerifiedDeal(
-                            destination=destination,
-                            departure_month=months[0],
-                            return_month=months[0],
-                            price=actual_price,
-                            departure_at=departure_at,
-                            return_at=return_at,
-                            duration_total=v3_result.get('duration', 0),
-                            outbound_stops=v3_result.get('transfers', candidate.outbound_transfers),
-                            return_stops=v3_result.get('return_transfers', candidate.return_transfers),
-                            airline=v3_result.get('airline', candidate.outbound_airline),
-                            booking_link=self._create_booking_link(candidate, v3_result),
-                            deal_type=deal_type,
-                            median_price=market_data['median_price'],
-                            savings_percent=savings_percent,
-                            trip_duration_days=candidate.duration_days,
-                            z_score=percentile_score,
-                            percentile=percentile_rank,
-                            outbound_flight_number=v3_result.get('flight_number', ''),
-                            return_flight_number=v3_result.get('return_flight_number', ''),
-                            outbound_duration=v3_result.get('outbound_duration', 0),
-                            return_duration=v3_result.get('return_duration', 0)
-                        )
-                        
-                        console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Percentile score: {percentile_score:.1f}, Threshold: {self.api.get_absolute_threshold(destination)})")
-                else:
-                    console.info(f"    ❌ Candidate {debug_count}: Not a deal")
-            else:
-                console.info(f"    ❌ Candidate {debug_count}: No API verification result")
+                    best_percentile_score = percentile_score
+                    
+                    # Extract date information safely
+                    departure_at = v3_result.get('departure_at', candidate.outbound_date)
+                    return_at = v3_result.get('return_at', candidate.return_date)
+                    
+                    # Handle datetime strings
+                    if 'T' in departure_at:
+                        departure_at = departure_at.split('T')[0]
+                    if 'T' in return_at:
+                        return_at = return_at.split('T')[0]
+                    
+                    best_deal = VerifiedDeal(
+                        destination=destination,
+                        departure_month=months[0],
+                        return_month=months[0],
+                        price=actual_price,
+                        departure_at=departure_at,
+                        return_at=return_at,
+                        duration_total=v3_result.get('duration', 0),
+                        outbound_stops=v3_result.get('transfers', candidate.outbound_transfers),
+                        return_stops=v3_result.get('return_transfers', candidate.return_transfers),
+                        airline=v3_result.get('airline', candidate.outbound_airline),
+                        booking_link=self._create_booking_link(candidate, v3_result),
+                        deal_type=deal_type,
+                        median_price=market_data['median_price'],
+                        savings_percent=savings_percent,
+                        trip_duration_days=candidate.duration_days,
+                        z_score=percentile_score,
+                        percentile=percentile_rank,
+                        outbound_flight_number=v3_result.get('flight_number', ''),
+                        return_flight_number=v3_result.get('return_flight_number', ''),
+                        outbound_duration=v3_result.get('outbound_duration', 0),
+                        return_duration=v3_result.get('return_duration', 0)
+                    )
+                    
+                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Percentile score: {percentile_score:.1f}, Threshold: {self.api.get_absolute_threshold(destination)})")
             
             time.sleep(0.3)
-        
-        if not best_deal:
-            console.info(f"  📊 {destination}: No deals passed smart filter after checking {debug_count} candidates")
         
         return [best_deal] if best_deal else []
     
@@ -1061,7 +1038,7 @@ class MongoFlightBot:
                       f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
-                      f"⚡ Percentile-based ≥2.5 (top 10%) OR Country-specific thresholds | Smart deduplication active\n"
+                      f"⚡ Percentile-based ≥1.7 OR Country-specific thresholds | Smart deduplication active\n"
                       f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
         
         if not self.telegram.send(startup_msg):
@@ -1159,7 +1136,7 @@ class MongoFlightBot:
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
-                      f"❌ No deals found (Percentile ≥2.5 OR country-specific thresholds required)\n\n"
+                      f"❌ No deals found (Percentile ≥1.7 OR country-specific thresholds required)\n\n"
                       f"🗃️ 45-day rolling cache (optimized)\n"
                       f"⚡ ALWAYS updates cache - no skipping\n"
                       f"☁️ Persistent MongoDB Atlas storage\n"
@@ -1171,6 +1148,7 @@ class MongoFlightBot:
         # Efficient categorization based on percentile scores
         exceptional = sum(1 for d in deals if d.z_score >= self.PERCENTILE_THRESHOLDS['exceptional'])
         excellent = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['excellent'] <= d.z_score < self.PERCENTILE_THRESHOLDS['exceptional'])
+        great = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['great'] <= d.z_score < self.PERCENTILE_THRESHOLDS['excellent'])
         
         # Calculate savings
         total_savings = sum(d.savings_percent for d in deals)
@@ -1183,6 +1161,7 @@ class MongoFlightBot:
                   f"✅ **{len(deals)} DEALS FOUND**\n"
                   f"🔥 {exceptional} exceptional (P≥{self.PERCENTILE_THRESHOLDS['exceptional']})\n"
                   f"💎 {excellent} excellent (P≥{self.PERCENTILE_THRESHOLDS['excellent']})\n"
+                  f"💰 {great} great (P≥{self.PERCENTILE_THRESHOLDS['great']})\n\n"
                   f"📊 Average savings: {avg_savings:.0f}%\n"
                   f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
                   f"🎯 Smart deduplication active (max 1 deal per destination)\n"
