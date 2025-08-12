@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-MongoDB Flight Bot - Complete Production Version
-✅ Updated with PERCENTILE-based deal detection (replaces Z-score)
-✅ Country-specific absolute thresholds + robust percentile filtering
-✅ Combined deal logic: Percentile-based OR price < absolute threshold
+MongoDB Flight Bot - Absolute Thresholds Only Version
+✅ SIMPLIFIED: Only uses country-specific absolute price thresholds
+✅ Removed all percentile-based logic for simplicity
 ✅ Smart deduplication - max 1 deal per destination per run
 ✅ MongoDB 45-day cache with always-update logic
 ✅ All 150+ destinations properly mapped with flags/countries
-✅ Robust to outliers and corrupted cache data
+✅ Focuses purely on flights below absolute price limits
 
-PERCENTILE SYSTEM: Top 5%, 10%, 20%, 25% deals + absolute thresholds
+ABSOLUTE THRESHOLD SYSTEM: Only country-specific price limits (no percentiles)
 Ready for GitHub Actions deployment - just copy, paste, and commit!
 """
 
@@ -80,7 +79,7 @@ class VerifiedDeal:
     median_price: float
     savings_percent: float
     trip_duration_days: int
-    z_score: float = 0.0
+    absolute_threshold: float = 0.0
     percentile: float = 0.0
     outbound_flight_number: str = ""
     return_flight_number: str = ""
@@ -222,7 +221,7 @@ class VerifiedDeal:
         
         return (f"{header}\n\n"
                 f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n"
-                f"📊 {self.savings_percent:.0f}% below typical ({self.median_price:.0f} zł)\n\n"
+                f"💰 Below {self.absolute_threshold:.0f} zł threshold • {self.savings_percent:.0f}% vs typical ({self.median_price:.0f} zł)\n\n"
                 f"🔗 [Book Deal]({self.booking_link})")
 
 class MongoFlightCache:
@@ -322,17 +321,17 @@ class MongoFlightCache:
             except Exception as e:
                 console.info(f"⚠️ Final batch insert error: {e}")
         
-        # Update statistics for all destinations that have data
-        self._update_all_destination_stats()
+        # Update statistics for all destinations that have data (simplified for absolute thresholds only)
+        self._update_basic_destination_stats()
         
         # Clean up old data (keep 45-day window)
         self._manage_rolling_window(today)
         
         console.info(f"✅ MongoDB cache update complete - {total_cached:,} entries cached from {successful_destinations} destinations")
     
-    def _update_all_destination_stats(self):
-        """Update statistics for all destinations with sufficient data"""
-        console.info("📊 Updating destination statistics...")
+    def _update_basic_destination_stats(self):
+        """Update basic statistics for all destinations - simplified for absolute thresholds"""
+        console.info("📊 Updating basic destination statistics...")
         
         try:
             # Get all destinations with data
@@ -347,11 +346,10 @@ class MongoFlightCache:
                 )
                 prices = [doc['price'] for doc in prices_cursor]
                 
-                if len(prices) >= 50:  # Need minimum data for reliable stats
+                if len(prices) >= 10:  # Much lower threshold since we only need basic stats
                     stats_doc = {
                         'destination': destination,
                         'median_price': statistics.median(prices),
-                        'std_dev': statistics.stdev(prices) if len(prices) > 1 else 0,
                         'min_price': min(prices),
                         'max_price': max(prices),
                         'sample_size': len(prices),
@@ -366,7 +364,7 @@ class MongoFlightCache:
                     )
                     stats_updated += 1
             
-            console.info(f"📊 Updated statistics for {stats_updated} destinations")
+            console.info(f"📊 Updated basic statistics for {stats_updated} destinations")
             
         except Exception as e:
             console.info(f"⚠️ Error updating destination stats: {e}")
@@ -389,7 +387,6 @@ class MongoFlightCache:
                 return {
                     'destination': stats['destination'],
                     'median_price': stats['median_price'],
-                    'std_dev': stats['std_dev'],
                     'min_price': stats['min_price'],
                     'max_price': stats['max_price'],
                     'sample_size': stats['sample_size']
@@ -399,19 +396,6 @@ class MongoFlightCache:
             console.info(f"⚠️ Error getting market data for {destination}: {e}")
             return None
     
-    def get_all_prices_for_destination(self, destination: str) -> Optional[List[float]]:
-        """Get all cached prices for percentile calculations - INCREASED MINIMUM THRESHOLD"""
-        try:
-            prices_cursor = self.db.flight_data.find(
-                {'destination': destination}, 
-                {'price': 1, '_id': 0}
-            )
-            prices = [doc['price'] for doc in prices_cursor if doc.get('price', 0) > 0]
-            return prices if len(prices) >= 100 else None  # INCREASED from 50 to 100
-        except Exception as e:
-            console.info(f"⚠️ Error getting all prices for {destination}: {e}")
-            return None
-    
     def get_cache_summary(self) -> Dict:
         """Get cache statistics"""
         try:
@@ -419,7 +403,7 @@ class MongoFlightCache:
             total_entries = self.db.flight_data.count_documents({})
             
             # Destinations with stats
-            ready_destinations = self.db.destination_stats.count_documents({'sample_size': {'$gte': 50}})
+            ready_destinations = self.db.destination_stats.count_documents({'sample_size': {'$gte': 10}})
             
             # Date range
             date_range = None
@@ -446,7 +430,7 @@ class MongoFlightCache:
             alert_doc = {
                 'destination': deal.destination,
                 'price': deal.price,
-                'percentile_score': deal.z_score,  # Using z_score field for percentile_score
+                'absolute_threshold': deal.absolute_threshold,
                 'alert_date': datetime.now().strftime('%Y-%m-%d')
             }
             self.db.deal_alerts.insert_one(alert_doc)
@@ -476,12 +460,12 @@ class MongoFlightCache:
             console.info(f"⚠️ Error cleaning up alerts: {e}")
 
 class SmartAPI:
-    """Optimized API handler with efficient caching"""
+    """Optimized API handler with efficient caching - ABSOLUTE THRESHOLDS ONLY"""
     
     PRICE_LIMITS = (200, 6000)
     MAX_PRICE_FILTER = 8000
     
-    # NEW COUNTRY-SPECIFIC ABSOLUTE DEAL THRESHOLDS
+    # COUNTRY-SPECIFIC ABSOLUTE DEAL THRESHOLDS (ONLY THRESHOLD SYSTEM)
     ABSOLUTE_DEAL_THRESHOLDS = {
         # Countries mapped to their specific thresholds in PLN
         'Italy': 300,
@@ -771,10 +755,9 @@ class FastTelegram:
             return False
 
 class MongoFlightBot:
-    """MongoDB-powered automated flight bot with 45-day cache - ALWAYS UPDATES"""
+    """MongoDB-powered automated flight bot - ABSOLUTE THRESHOLDS ONLY"""
     
-    # Class constants for better memory usage
-    PERCENTILE_THRESHOLDS = {'exceptional': 3.0, 'excellent': 2.5, 'great': 2.0, 'minimum': 2.0}
+    # Simplified constants - no percentile thresholds needed
     WEEKLY_RESET_DAYS = 7
     PRICE_IMPROVEMENT_THRESHOLD = 0.05
     
@@ -811,8 +794,8 @@ class MongoFlightBot:
             months.append(f"{year:04d}-{month:02d}")
         return months
     
-    def should_alert_destination(self, destination: str, current_price: float, percentile_score: float) -> bool:
-        """Smart alerting logic with MongoDB access - works for both percentile and absolute deals"""
+    def should_alert_destination(self, destination: str, current_price: float, absolute_threshold: float) -> bool:
+        """Simple alerting logic based on absolute thresholds only"""
         recent_alert = self.cache.get_recent_alert(destination)
         if not recent_alert:
             return True
@@ -828,91 +811,29 @@ class MongoFlightBot:
         return (days_since >= self.WEEKLY_RESET_DAYS or 
                 (last_price - current_price) / last_price > self.PRICE_IMPROVEMENT_THRESHOLD)
     
-    def classify_deal_with_percentiles(self, price: float, destination: str, market_data: Dict) -> Tuple[str, float, float, float, bool]:
-        """Deal classification with PERCENTILES AND absolute thresholds - ROBUST TO OUTLIERS"""
-        percentile_rank = 50.0
-        savings_percent = 0.0
-        percentile_score = 0.0  # For compatibility with existing code
-        
-        # Check absolute threshold first
+    def classify_deal_with_absolute_threshold(self, price: float, destination: str, market_data: Dict) -> Tuple[str, float, float, bool]:
+        """SIMPLIFIED: Deal classification using only absolute thresholds"""
         absolute_threshold = self.api.get_absolute_threshold(destination)
-        is_absolute_deal = price < absolute_threshold
+        savings_percent = 0.0
         
-        # Calculate percentile-based metrics if we have sufficient market data
-        percentile_deal_level = None
+        # Calculate savings percentage vs median if we have market data
+        if market_data and market_data.get('median_price', 0) > 0:
+            median_price = market_data['median_price']
+            savings_percent = ((median_price - price) / median_price) * 100
         
-        if market_data and market_data.get('sample_size', 0) >= 100:  # INCREASED from 50 to 100
-            # Get all prices for percentile calculation
-            all_prices = self.cache.get_all_prices_for_destination(destination)
-            
-            if all_prices and len(all_prices) >= 100:  # INCREASED from 50 to 100
-                sorted_prices = sorted(all_prices)
-                median_price = market_data['median_price']
-                
-                # Calculate savings percentage
-                if median_price > 0:
-                    savings_percent = ((median_price - price) / median_price) * 100
-                
-                # Calculate percentile thresholds
-                p5 = sorted_prices[int(0.05 * len(sorted_prices))]   # Top 5% 
-                p10 = sorted_prices[int(0.10 * len(sorted_prices))]  # Top 10%
-                p20 = sorted_prices[int(0.20 * len(sorted_prices))]  # Top 20%
-                p25 = sorted_prices[int(0.25 * len(sorted_prices))]  # Top 25%
-                
-                # Determine percentile rank (where this price falls)
-                rank_position = sum(1 for p in sorted_prices if p <= price)
-                percentile_rank = (rank_position / len(sorted_prices)) * 100
-                
-                # Assign percentile score for compatibility (higher = better deal)
-                if price <= p5:
-                    percentile_score = 3.0
-                    percentile_deal_level = "top 5%"
-                elif price <= p10:
-                    percentile_score = 2.5
-                    percentile_deal_level = "top 10%"
-                elif price <= p20:
-                    percentile_score = 2.0
-                    percentile_deal_level = "top 20%"
-                elif price <= p25:
-                    percentile_score = 1.7
-                    percentile_deal_level = "top 25%"
-                else:
-                    percentile_score = 0.0
-                    
-                console.info(f"  📊 {destination}: Using percentiles with {len(all_prices)} samples (P10={p10:.0f}, P25={p25:.0f})")
+        # Simple absolute threshold check
+        if price < absolute_threshold:
+            # Categorize based on how much below threshold
+            if price < absolute_threshold * 0.7:
+                deal_type = "🔥 Exceptional Deal"
+            elif price < absolute_threshold * 0.85:
+                deal_type = "💎 Excellent Deal"
             else:
-                console.info(f"  ⚠️ {destination}: Only {len(all_prices) if all_prices else 0} cached prices, need 100+ for percentiles")
+                deal_type = "💰 Great Deal"
+            
+            return deal_type, absolute_threshold, savings_percent, True
         else:
-            sample_size = market_data.get('sample_size', 0) if market_data else 0
-            console.info(f"  ⚠️ {destination}: Only {sample_size} samples in stats, need 100+ for percentiles")
-        
-        # COMBINED LOGIC: Absolute threshold OR percentile-based deal
-        if (is_absolute_deal and price < absolute_threshold * 0.8) or percentile_deal_level == "top 5%":
-            deal_type = "🔥 Exceptional Deal"
-            if percentile_deal_level:
-                deal_type += f" ({percentile_deal_level})"
-            elif is_absolute_deal:
-                deal_type += " (absolute)"
-            return deal_type, percentile_score, savings_percent, percentile_rank, True
-            
-        elif (is_absolute_deal and price < absolute_threshold * 0.9) or percentile_deal_level == "top 10%":
-            deal_type = "💎 Excellent Deal"
-            if percentile_deal_level:
-                deal_type += f" ({percentile_deal_level})"
-            elif is_absolute_deal:
-                deal_type += " (absolute)"
-            return deal_type, percentile_score, savings_percent, percentile_rank, True
-            
-        elif is_absolute_deal or percentile_deal_level in ["top 20%", "top 25%"]:
-            deal_type = "💰 Great Deal"
-            if percentile_deal_level:
-                deal_type += f" ({percentile_deal_level})"
-            elif is_absolute_deal:
-                deal_type += " (absolute)"
-            return deal_type, percentile_score, savings_percent, percentile_rank, True
-            
-        else:
-            return "📊 Fair Price", percentile_score, savings_percent, percentile_rank, False
+            return "📊 Above Threshold", absolute_threshold, savings_percent, False
     
     def _create_booking_link(self, candidate: RoundTripCandidate, v3_result: Dict) -> str:
         """Create optimized booking link"""
@@ -924,8 +845,11 @@ class MongoFlightBot:
                    f"{candidate.destination}{candidate.return_date}?marker={self.api.affiliate_marker}")
     
     def find_and_verify_deals_for_destination(self, destination: str, market_data: Dict, months: List[str]) -> List[VerifiedDeal]:
-        """Find and verify deals - MAXIMUM 1 DEAL PER DESTINATION"""
+        """Find and verify deals - SIMPLIFIED FOR ABSOLUTE THRESHOLDS ONLY"""
         console.info(f"  🔍 Searching for deals in {destination}")
+        
+        absolute_threshold = self.api.get_absolute_threshold(destination)
+        console.info(f"  💰 Absolute threshold: {absolute_threshold} zł")
         
         try:
             candidates = self.api.generate_comprehensive_roundtrip_combinations('WAW', destination, months)
@@ -937,25 +861,23 @@ class MongoFlightBot:
             console.info(f"  📊 {destination}: No valid combinations found")
             return []
         
-        # Efficient sorting and filtering
-        for candidate in candidates:
-            if market_data['std_dev'] > 0:
-                candidate.estimated_savings_percent = ((market_data['median_price'] - candidate.total_price) / 
-                                                      market_data['std_dev'])
-            else:
-                candidate.estimated_savings_percent = 0
+        # Filter candidates that are below the absolute threshold
+        cheap_candidates = [c for c in candidates if c.total_price < absolute_threshold]
         
-        # Take top candidates efficiently
-        top_candidates = sorted(candidates, key=lambda x: x.estimated_savings_percent, reverse=True)[:10]
-        console.info(f"  📋 Verifying top {len(top_candidates)} candidates from {len(candidates):,} combinations")
+        if not cheap_candidates:
+            console.info(f"  📊 {destination}: No candidates below {absolute_threshold} zł threshold")
+            return []
+        
+        # Sort by price (cheapest first)
+        cheap_candidates.sort(key=lambda x: x.total_price)
+        top_candidates = cheap_candidates[:5]  # Only verify top 5 cheapest
+        
+        console.info(f"  📋 Verifying top {len(top_candidates)} candidates below threshold from {len(candidates):,} total combinations")
         
         best_deal = None
-        best_percentile_score = 0
+        best_price = float('inf')
         
         for candidate in top_candidates:
-            if candidate.estimated_savings_percent < 1.0:
-                continue
-            
             try:
                 v3_result = self.api.get_v3_verification('WAW', destination, candidate.outbound_date, candidate.return_date)
             except Exception as e:
@@ -967,12 +889,12 @@ class MongoFlightBot:
                 if actual_price <= 0:
                     continue
                 
-                deal_type, percentile_score, savings_percent, percentile_rank, is_deal = self.classify_deal_with_percentiles(actual_price, destination, market_data)
+                deal_type, threshold_used, savings_percent, is_deal = self.classify_deal_with_absolute_threshold(actual_price, destination, market_data)
                 
-                if (is_deal and percentile_score > best_percentile_score and
-                    self.should_alert_destination(destination, actual_price, percentile_score)):
+                if (is_deal and actual_price < best_price and
+                    self.should_alert_destination(destination, actual_price, threshold_used)):
                     
-                    best_percentile_score = percentile_score
+                    best_price = actual_price
                     
                     # Extract date information safely
                     departure_at = v3_result.get('departure_at', candidate.outbound_date)
@@ -997,18 +919,18 @@ class MongoFlightBot:
                         airline=v3_result.get('airline', candidate.outbound_airline),
                         booking_link=self._create_booking_link(candidate, v3_result),
                         deal_type=deal_type,
-                        median_price=market_data['median_price'],
+                        median_price=market_data.get('median_price', 0) if market_data else 0,
                         savings_percent=savings_percent,
                         trip_duration_days=candidate.duration_days,
-                        z_score=percentile_score,
-                        percentile=percentile_rank,
+                        absolute_threshold=threshold_used,
+                        percentile=0.0,  # Not used in absolute threshold mode
                         outbound_flight_number=v3_result.get('flight_number', ''),
                         return_flight_number=v3_result.get('return_flight_number', ''),
                         outbound_duration=v3_result.get('outbound_duration', 0),
                         return_duration=v3_result.get('return_duration', 0)
                     )
                     
-                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Percentile score: {percentile_score:.1f}, Threshold: {self.api.get_absolute_threshold(destination)})")
+                    console.info(f"  🏆 DEAL FOUND: {actual_price:.0f} zł (Below {threshold_used:.0f} zł threshold)")
             
             time.sleep(0.3)
         
@@ -1027,7 +949,7 @@ class MongoFlightBot:
         """Main automated method: ALWAYS updates MongoDB cache AND detects deals"""
         self.total_start_time = time.time()
         
-        console.info("🤖 MONGODB FLIGHT BOT STARTED (ALWAYS UPDATES CACHE)")
+        console.info("🤖 MONGODB FLIGHT BOT STARTED - ABSOLUTE THRESHOLDS ONLY")
         console.info("=" * 60)
         
         months = self._generate_future_months()
@@ -1038,7 +960,8 @@ class MongoFlightBot:
                       f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
                       f"📅 Months: {', '.join(months)}\n\n"
-                      f"⚡ Percentile-based ≥1.7 OR Country-specific thresholds | Smart deduplication active\n"
+                      f"💰 ABSOLUTE THRESHOLDS ONLY - No percentile calculations\n"
+                      f"🎯 Smart deduplication active | Country-specific price limits\n"
                       f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
         
         if not self.telegram.send(startup_msg):
@@ -1079,8 +1002,8 @@ class MongoFlightBot:
             return []
         
         # PHASE 2: DEAL DETECTION
-        console.info("\n🎯 PHASE 2: DEAL DETECTION")
-        console.info("=" * 30)
+        console.info("\n🎯 PHASE 2: DEAL DETECTION - ABSOLUTE THRESHOLDS ONLY")
+        console.info("=" * 40)
         
         self.start_time = time.time()
         all_deals = []
@@ -1093,7 +1016,8 @@ class MongoFlightBot:
             try:
                 market_data = self.cache.get_market_data(destination)
                 
-                if market_data and market_data['sample_size'] >= 50:
+                # We only need basic market data for savings percentage calculation
+                if market_data and market_data['sample_size'] >= 5:  # Very low threshold since we don't need percentiles
                     console.info(f"  ✅ {destination}: {market_data['sample_size']} samples, median: {market_data['median_price']:.0f} zł, threshold: {self.api.get_absolute_threshold(destination)} zł")
                     
                     verified_deals = self.find_and_verify_deals_for_destination(destination, market_data, months)
@@ -1104,10 +1028,17 @@ class MongoFlightBot:
                             all_deals.append(deal)
                             self.send_immediate_deal_alert(deal, deals_found, elapsed_time/60)
                     else:
-                        console.info(f"  📊 {destination}: No deals passed smart filter")
+                        console.info(f"  📊 {destination}: No deals below absolute threshold")
                 else:
-                    sample_size = market_data['sample_size'] if market_data else 0
-                    console.info(f"  ⚠️ {destination}: Insufficient cached data ({sample_size} samples)")
+                    # Even without market data, we can still check absolute thresholds
+                    console.info(f"  ⚠️ {destination}: Limited market data, checking absolute threshold only")
+                    verified_deals = self.find_and_verify_deals_for_destination(destination, {}, months)
+                    
+                    if verified_deals:
+                        deals_found += len(verified_deals)
+                        for deal in verified_deals:
+                            all_deals.append(deal)
+                            self.send_immediate_deal_alert(deal, deals_found, elapsed_time/60)
                 
                 # Progress update every 25 destinations
                 if i % 25 == 0:
@@ -1136,7 +1067,8 @@ class MongoFlightBot:
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                       f"📊 Database: {cache_summary['total_entries']:,} entries\n"
                       f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
-                      f"❌ No deals found (Percentile ≥1.7 OR country-specific thresholds required)\n\n"
+                      f"❌ No deals found below absolute thresholds\n\n"
+                      f"💰 ABSOLUTE THRESHOLDS ONLY - Simplified system\n"
                       f"🗃️ 45-day rolling cache (optimized)\n"
                       f"⚡ ALWAYS updates cache - no skipping\n"
                       f"☁️ Persistent MongoDB Atlas storage\n"
@@ -1145,26 +1077,32 @@ class MongoFlightBot:
             self.telegram.send(summary)
             return
         
-        # Efficient categorization based on percentile scores
-        exceptional = sum(1 for d in deals if d.z_score >= self.PERCENTILE_THRESHOLDS['exceptional'])
-        excellent = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['excellent'] <= d.z_score < self.PERCENTILE_THRESHOLDS['exceptional'])
-        great = sum(1 for d in deals if self.PERCENTILE_THRESHOLDS['great'] <= d.z_score < self.PERCENTILE_THRESHOLDS['excellent'])
+        # Simple categorization based on deal types
+        exceptional = sum(1 for d in deals if "Exceptional" in d.deal_type)
+        excellent = sum(1 for d in deals if "Excellent" in d.deal_type)
+        great = sum(1 for d in deals if "Great" in d.deal_type)
         
         # Calculate savings
-        total_savings = sum(d.savings_percent for d in deals)
-        avg_savings = total_savings / len(deals) if deals else 0
+        total_savings = sum(d.savings_percent for d in deals if d.savings_percent > 0)
+        avg_savings = total_savings / len([d for d in deals if d.savings_percent > 0]) if any(d.savings_percent > 0 for d in deals) else 0
+        
+        # Calculate average threshold savings
+        avg_threshold = sum(d.absolute_threshold for d in deals) / len(deals) if deals else 0
+        avg_price = sum(d.price for d in deals) / len(deals) if deals else 0
         
         summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
                   f"⏱️ Total runtime: {total_time:.1f} minutes\n"
                   f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
                   f"🎯 Deal detection: {detection_time:.1f} min\n\n"
                   f"✅ **{len(deals)} DEALS FOUND**\n"
-                  f"🔥 {exceptional} exceptional (P≥{self.PERCENTILE_THRESHOLDS['exceptional']})\n"
-                  f"💎 {excellent} excellent (P≥{self.PERCENTILE_THRESHOLDS['excellent']})\n"
-                  f"💰 {great} great (P≥{self.PERCENTILE_THRESHOLDS['great']})\n\n"
-                  f"📊 Average savings: {avg_savings:.0f}%\n"
+                  f"🔥 {exceptional} exceptional deals\n"
+                  f"💎 {excellent} excellent deals\n"
+                  f"💰 {great} great deals\n\n"
+                  f"📊 Average price: {avg_price:.0f} zł (vs {avg_threshold:.0f} zł threshold)\n"
+                  f"📈 Average savings: {avg_savings:.0f}% vs typical prices\n"
                   f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
                   f"🎯 Smart deduplication active (max 1 deal per destination)\n"
+                  f"💰 ABSOLUTE THRESHOLDS ONLY - No percentiles needed\n"
                   f"⚡ ALWAYS updates cache - no skipping\n"
                   f"☁️ Persistent MongoDB Atlas cache\n\n"
                   f"🔄 Next run: Tomorrow (automated)")
@@ -1173,7 +1111,7 @@ class MongoFlightBot:
         console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
-        """Single command that does EVERYTHING with MongoDB - ALWAYS UPDATES"""
+        """Single command that does EVERYTHING with MongoDB - ABSOLUTE THRESHOLDS ONLY"""
         try:
             # Clean up old alerts first
             self.cache.cleanup_old_alerts()
@@ -1183,9 +1121,10 @@ class MongoFlightBot:
             
             # Summary
             total_time = (time.time() - self.total_start_time) / 60
-            console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE")
+            console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE - ABSOLUTE THRESHOLDS ONLY")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
+            console.info(f"💰 Using only country-specific absolute thresholds")
             console.info(f"🗃️ 45-day cache with FULL daily updates")
             console.info(f"⚡ No cache skipping - always updates")
             console.info(f"☁️ Persistent storage maintained")
@@ -1199,7 +1138,7 @@ class MongoFlightBot:
             self.telegram.send(f"❌ MongoDB bot error: {str(e)}")
 
 def main():
-    """Main function for MongoDB-powered automation with ALWAYS UPDATE cache"""
+    """Main function for MongoDB-powered automation - ABSOLUTE THRESHOLDS ONLY"""
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -1241,8 +1180,7 @@ def main():
         deals = []
         for destination in bot.DESTINATIONS[:10]:  # Test with first 10
             market_data = bot.cache.get_market_data(destination)
-            if market_data:
-                deals.extend(bot.find_and_verify_deals_for_destination(destination, market_data, months))
+            deals.extend(bot.find_and_verify_deals_for_destination(destination, market_data or {}, months))
         console.info(f"Found {len(deals)} deals in test")
     else:
         # DEFAULT: Full automation (MongoDB cache + detection)
