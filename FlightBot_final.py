@@ -1090,22 +1090,7 @@ class MongoFlightBot:
         avg_threshold = sum(d.absolute_threshold for d in deals) / len(deals) if deals else 0
         avg_price = sum(d.price for d in deals) / len(deals) if deals else 0
         
-        summary = (f"🤖 *Flight bot complete*\n\n"
-                  f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                  f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
-                  f"🎯 Deal detection: {detection_time:.1f} min\n\n"
-                  f"✅ **{len(deals)} DEALS FOUND**\n"
-                  f"🔥 {exceptional} exceptional deals\n"
-                  f"💎 {excellent} excellent deals\n"
-                  f"💰 {great} great deals\n\n"
-                  f"📊 Average price: {avg_price:.0f} zł (vs {avg_threshold:.0f} zł threshold)\n"
-                  f"📈 Average savings: {avg_savings:.0f}% vs typical prices\n"
-                  f"🗃️ Database: {cache_summary['total_entries']:,} entries (45-day window)\n"
-                  f"🎯 Smart deduplication active (max 1 deal per destination)\n"
-                  f"💰 ABSOLUTE THRESHOLDS ONLY - No percentiles needed\n"
-                  f"⚡ ALWAYS updates cache - no skipping\n"
-                  f"☁️ Persistent MongoDB Atlas cache\n\n"
-                  f"🔄 Next run: Tomorrow (automated)")
+        summary = "Flight bot complete"
         
         self.telegram.send(summary)
         console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
