@@ -955,14 +955,7 @@ class MongoFlightBot:
         months = self._generate_future_months()
         
         # Send startup notification
-        startup_msg = (f"🤖 *Flight bot started*\n\n"
-                      f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
-                      f"⚡ ALWAYS performs full daily update\n"
-                      f"🎯 Phase 2: Deal Detection\n"
-                      f"📅 Months: {', '.join(months)}\n\n"
-                      f"💰 ABSOLUTE THRESHOLDS ONLY - No percentile calculations\n"
-                      f"🎯 Smart deduplication active | Country-specific price limits\n"
-                      f"☁️ Persistent MongoDB Atlas cache (1.5 months)")
+        startup_msg = "Flight bot started"
         
         if not self.telegram.send(startup_msg):
             console.info("⚠️ Failed to send startup notification")
@@ -983,17 +976,8 @@ class MongoFlightBot:
             console.info(f"✅ MongoDB cache update completed in {cache_time:.1f} minutes")
             console.info(f"📊 Cache summary: {cache_summary['total_entries']:,} entries, {cache_summary['ready_destinations']} destinations ready")
             
-            # Send cache update notification
-            cache_msg = (f"✅ *MONGODB CACHE UPDATE COMPLETE*\n\n"
-                        f"⏱️ Time: {cache_time:.1f} minutes\n"
-                        f"📊 Total entries: {cache_summary['total_entries']:,}\n"
-                        f"🎯 Ready destinations: {cache_summary['ready_destinations']}\n"
-                        f"🗃️ 45-day rolling window (optimized for 512 MB)\n"
-                        f"⚡ FULL daily update performed\n"
-                        f"☁️ Persistent cloud storage\n\n"
-                        f"🚀 Starting deal detection...")
-            
-            self.telegram.send(cache_msg)
+            # Send cache update notification - REMOVED
+            # No message sent here anymore
             
         except Exception as e:
             error_msg = f"❌ MongoDB cache update failed: {e}"
@@ -1061,18 +1045,7 @@ class MongoFlightBot:
         cache_summary = self.cache.get_cache_summary()
         
         if not deals:
-            summary = (f"🤖 *Flight bot complete*\n\n"
-                      f"⏱️ Total runtime: {total_time:.1f} minutes\n"
-                      f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
-                      f"🎯 Deal detection: {detection_time:.1f} min\n\n"
-                      f"📊 Database: {cache_summary['total_entries']:,} entries\n"
-                      f"🔍 Processed {len(self.DESTINATIONS)} destinations\n"
-                      f"❌ No deals found below absolute thresholds\n\n"
-                      f"💰 ABSOLUTE THRESHOLDS ONLY - Simplified system\n"
-                      f"🗃️ 45-day rolling cache (optimized)\n"
-                      f"⚡ ALWAYS updates cache - no skipping\n"
-                      f"☁️ Persistent MongoDB Atlas storage\n"
-                      f"🔄 Next run: Tomorrow (automated)")
+            summary = "Flight bot complete"
             
             self.telegram.send(summary)
             return
