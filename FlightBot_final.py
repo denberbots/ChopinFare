@@ -468,35 +468,35 @@ class SmartAPI:
     # COUNTRY-SPECIFIC ABSOLUTE DEAL THRESHOLDS (ONLY THRESHOLD SYSTEM)
     ABSOLUTE_DEAL_THRESHOLDS = {
         # Countries mapped to their specific thresholds in PLN
-        'Italy': 300,
-        'Spain': 350,
-        'United Kingdom': 350,
-        'France': 350,
-        'Germany': 300,
-        'Netherlands': 350,
-        'Greece': 450,
-        'Portugal': 450,
+        'Italy': 250,
+        'Spain': 250,
+        'United Kingdom': 250,
+        'France': 300,
+        'Germany': 250,
+        'Netherlands': 300,
+        'Greece': 350,
+        'Portugal': 350,
         'Sweden': 300,
-        'Norway': 350,
+        'Norway': 250,
         'Finland': 350,
-        'Iceland': 500,
-        'Denmark': 300,
-        'Austria': 300,
-        'Czech Republic': 250,
-        'Belgium': 300,
-        'Switzerland': 350,
-        'Hungary': 250,
-        'Ireland': 450,
-        'Bulgaria': 300,
-        'Romania': 300,
-        'Croatia': 350,
-        'Serbia': 300,
-        'Montenegro': 300,
-        'Albania': 300,
+        'Iceland': 450,
+        'Denmark': 250,
+        'Austria': 250,
+        'Czech Republic': 200,
+        'Belgium': 250,
+        'Switzerland': 300,
+        'Hungary': 200,
+        'Ireland': 300,
+        'Bulgaria': 250,
+        'Romania': 250,
+        'Croatia': 300,
+        'Serbia': 250,
+        'Montenegro': 250,
+        'Albania': 250,
         'Poland': 999999,  # Domestic - set very high to exclude
-        'Russia': 600,
+        'Russia': 750,
         'Belarus': 500,
-        'Turkey': 600,
+        'Turkey': 550,
         'Israel': 700,
         'Armenia': 600,
         'Georgia': 550,
@@ -949,13 +949,13 @@ class MongoFlightBot:
         """Main automated method: ALWAYS updates MongoDB cache AND detects deals"""
         self.total_start_time = time.time()
         
-        console.info("🤖 MONGODB FLIGHT BOT STARTED - ABSOLUTE THRESHOLDS ONLY")
+        console.info("🤖 Flight bot started")
         console.info("=" * 60)
         
         months = self._generate_future_months()
         
         # Send startup notification
-        startup_msg = (f"🤖 *MONGODB FLIGHT BOT STARTED*\n\n"
+        startup_msg = (f"🤖 *Flight bot started*\n\n"
                       f"🗃️ Phase 1: MongoDB Cache Update (45-day window)\n"
                       f"⚡ ALWAYS performs full daily update\n"
                       f"🎯 Phase 2: Deal Detection\n"
@@ -1061,7 +1061,7 @@ class MongoFlightBot:
         cache_summary = self.cache.get_cache_summary()
         
         if not deals:
-            summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
+            summary = (f"🤖 *Flight bot complete*\n\n"
                       f"⏱️ Total runtime: {total_time:.1f} minutes\n"
                       f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
                       f"🎯 Deal detection: {detection_time:.1f} min\n\n"
@@ -1090,7 +1090,7 @@ class MongoFlightBot:
         avg_threshold = sum(d.absolute_threshold for d in deals) / len(deals) if deals else 0
         avg_price = sum(d.price for d in deals) / len(deals) if deals else 0
         
-        summary = (f"🤖 *MONGODB FLIGHT BOT COMPLETE*\n\n"
+        summary = (f"🤖 *Flight bot complete*\n\n"
                   f"⏱️ Total runtime: {total_time:.1f} minutes\n"
                   f"🗃️ MongoDB cache: {cache_time:.1f} min (FULL UPDATE)\n"
                   f"🎯 Deal detection: {detection_time:.1f} min\n\n"
@@ -1121,7 +1121,7 @@ class MongoFlightBot:
             
             # Summary
             total_time = (time.time() - self.total_start_time) / 60
-            console.info(f"\n🤖 MONGODB FLIGHT BOT COMPLETE - ABSOLUTE THRESHOLDS ONLY")
+            console.info(f"\n🤖 Flight bot complete")
             console.info(f"⏱️ Total time: {total_time:.1f} minutes")
             console.info(f"🎉 Found {len(deals)} deals")
             console.info(f"💰 Using only country-specific absolute thresholds")
