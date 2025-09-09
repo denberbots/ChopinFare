@@ -220,8 +220,7 @@ class VerifiedDeal:
         date_range = self._format_date_range(self.departure_at[:10], self.return_at[:10])
         
         return (f"{header}\n\n"
-                f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n"
-                f"💰 Below {self.absolute_threshold:.0f} zł threshold • {self.savings_percent:.0f}% vs typical ({self.median_price:.0f} zł)\n\n"
+                f"📅 {date_range} ({self.trip_duration_days} days) • {self._format_flight_type()}\n\n"
                 f"🔗 [Book Deal]({self.booking_link})")
 
 class MongoFlightCache:
@@ -954,11 +953,7 @@ class MongoFlightBot:
         
         months = self._generate_future_months()
         
-        # Send startup notification
-        startup_msg = "Flight bot started"
-        
-        if not self.telegram.send(startup_msg):
-            console.info("⚠️ Failed to send startup notification")
+        # NO startup notification sent to Telegram anymore
         
         # PHASE 1: UPDATE MONGODB CACHE (ALWAYS)
         console.info("\n🗃️ PHASE 1: MONGODB CACHE UPDATE (ALWAYS RUNS)")
@@ -1044,29 +1039,8 @@ class MongoFlightBot:
         # Get cache stats
         cache_summary = self.cache.get_cache_summary()
         
-        if not deals:
-            summary = "Flight bot complete"
-            
-            self.telegram.send(summary)
-            return
-        
-        # Simple categorization based on deal types
-        exceptional = sum(1 for d in deals if "Exceptional" in d.deal_type)
-        excellent = sum(1 for d in deals if "Excellent" in d.deal_type)
-        great = sum(1 for d in deals if "Great" in d.deal_type)
-        
-        # Calculate savings
-        total_savings = sum(d.savings_percent for d in deals if d.savings_percent > 0)
-        avg_savings = total_savings / len([d for d in deals if d.savings_percent > 0]) if any(d.savings_percent > 0 for d in deals) else 0
-        
-        # Calculate average threshold savings
-        avg_threshold = sum(d.absolute_threshold for d in deals) / len(deals) if deals else 0
-        avg_price = sum(d.price for d in deals) / len(deals) if deals else 0
-        
-        summary = "Flight bot complete"
-        
-        self.telegram.send(summary)
-        console.info(f"📱 Sent final summary - {len(deals)} deals in {total_time:.1f} minutes")
+        # NO completion message sent to Telegram anymore
+        console.info(f"📱 Bot completed - {len(deals)} deals in {total_time:.1f} minutes")
     
     def run(self):
         """Single command that does EVERYTHING with MongoDB - ABSOLUTE THRESHOLDS ONLY"""
